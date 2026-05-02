@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`apm install` now anchors transitive `local_path` deps on the declaring package's directory (npm/pip/cargo parity).** Sibling/monorepo layouts (e.g. `../base` declared inside `packages/specialized/apm.yml`) now resolve relative to the declaring package, not the consumer's project root. **Security tightening:** remote-cloned packages can no longer declare `local_path` deps -- both relative and absolute paths are rejected at `ERROR` severity at resolve time. (#1111, closes #857) Thanks @JahanzaibTayyab.
 - `apm compile` no longer silently drops instructions without an `applyTo` pattern from generated `AGENTS.md` and `CLAUDE.md`; globals now render under a `## Global Instructions` section, matching the optimizer's existing `(global)` placement (#1088, closes #1072)
 - `apm install` no longer masks local-bundle install failures with `UnboundLocalError`. (#PR_NUMBER)
 - **`apm install <pkg>@<marketplace>` no longer fails for all marketplace packages.** The install resolver now accepts both legacy and current marketplace key names: `repository`/`repo` for github sources, `url`/`repo` for git-subdir sources, and `type`/`source` as the source-type discriminator. A scheme guard rejects full URLs passed through the `url` fallback. (#1106, closes #1105)
