@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-05-03
+
+### Added
+
+- **Cursor slash command support (Cursor 1.6+).** `apm install` deploys package `.prompt.md` files to `.cursor/commands/*.md` when a `.cursor/` directory is present, completing cross-tool slash-command parity with Claude Code, OpenCode, and Gemini CLI. (#1046)
+- **`apm install` performance + UX overhaul:** WS3 persistent two-tier cache for git + HTTP (with rev-parse HEAD verification on cache hits), parallel level-batched BFS dependency resolution, parallel MCP registry batch lookups with ETag-revalidated HTTP cache, in-install repo clone dedup for subdirectory deps, reflink-aware file copies with write-dedup for cache checkouts, live progress UI for parallel resolution and download, per-phase timing in `--verbose`, elapsed time on every exit path, and ASCII-only progress bar. (#1116)
+
+### Fixed
+
+- **gh-aw lock workflows: bump `microsoft/apm-action` v1.5.0 -> v1.6.0** so packed bundles use the legacy `--format apm` layout that `apm unpack` accepts after the v0.12.0 default flip to plugin format. (#1121)
+- **Windows CI: explicit UTF-8 encoding** in the `_make_package` test helper to unblock Windows runners. (#1124)
+
 ## [0.12.0] - 2026-05-03
 
 ### Added
@@ -22,7 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Plugin manifest schema-conformance tests.** `tests/unit/test_plugin_exporter_schema.py` validates every shape of `plugin.json` produced by `apm pack` (synthesized, authored, and authored-with-stale-keys) against the vendored official schema. Companion marketplace conformance lives in `tests/unit/marketplace/test_schema_conformance.py`. (#1061)
 - **APM now compiles and integrates to Windsurf/Cascade.** New first-class `--target windsurf` support: instructions deploy as `.windsurf/rules/` with trigger frontmatter, agents deploy as `.windsurf/skills/<name>/SKILL.md`, commands as `.windsurf/workflows/`, hooks merge into `.windsurf/hooks.json`, and MCP servers configure via `~/.codeium/windsurf/mcp_config.json`. Auto-detection, user-scope deployment, and `apm pack` all support the new target. (#1066)
 - Slash commands installed from APM packages now surface argument hints in Claude Code -- `apm install` automatically maps prompt `input:` to Claude's `arguments:` front-matter, rewrites `${input:name}` references to `$name`, and auto-generates `argument-hint`. Argument names are validated against an allowlist to prevent YAML injection from third-party packages, and the mapping is reported at install time. (#1039)
-- **Cursor users get slash commands automatically.** `apm install` now deploys package `.prompt.md` files to `.cursor/commands/*.md` whenever a `.cursor/` directory is present -- no extra steps, no Cursor-specific manifest. Same `.prompt.md` files that already work for Claude Code, OpenCode, and Gemini CLI now register as Cursor 1.6+ slash commands too, completing cross-tool slash-command parity. Frontmatter keys outside the cross-tool subset (`description`, `allowed-tools`, `model`, `argument-hint`, `input`) are reported at install time so package authors see exactly what was preserved. Requires Cursor 1.6+; Cursor is de-emphasizing commands in favor of rules/skills, so monitor Cursor release notes for changes to this surface. (#1046)
 
 ### Changed
 
