@@ -1,10 +1,11 @@
 """GitHub package downloader for APM dependencies."""
 
+import contextlib
 import os
 import random  # noqa: F401
 import re
-import shutil
 import stat  # noqa: F401
+import subprocess
 import sys
 import tempfile
 import time  # noqa: F401
@@ -44,6 +45,12 @@ from ..utils.github_host import (
     sanitize_token_url_in_message,
 )
 from ..utils.yaml_io import yaml_to_str
+from .bare_cache import (
+    bare_clone_with_fallback,
+    build_clone_failure_message,
+    clone_with_fallback,
+    materialize_from_bare,
+)
 from .download_strategies import DownloadDelegate
 from .git_remote_ops import (
     parse_ls_remote_output,
@@ -577,30 +584,48 @@ class GitHubPackageDownloader:
         verbose_callback=None,
         **clone_kwargs,
     ) -> Repo:
-        """Clone a repository following the TransportSelector plan.
+        """Thin delegate to :func:`bare_cache.clone_with_fallback` (kept on the class so test patches still work)."""
+        return clone_with_fallback(
+            self._execute_transport_plan,
+            repo_url_base,
+            target_path,
+            progress_reporter=progress_reporter,
+            dep_ref=dep_ref,
+            verbose_callback=verbose_callback,
+            repo_cls=Repo,
+            **clone_kwargs,
+        )
 
-        The transport selector decides protocol order and strictness based on
-        the user's URL form, CLI/env preferences, and git ``insteadOf`` config.
-        Strict-by-default: explicit ``ssh://``, ``https://``, and ``http://``
-        URLs no longer silently fall back to a different protocol. To restore
-        the legacy permissive chain, set ``--allow-protocol-fallback`` or
-        ``APM_ALLOW_PROTOCOL_FALLBACK=1``.
+    def _execute_transport_plan(
+        self,
+        repo_url_base: str,
+        target_path: Path,
+        *,
+        dep_ref: DependencyReference | None = None,
+        clone_action: Callable[[str, dict[str, str], Path], None],
+        verbose_callback=None,
+    ) -> None:
+        """Execute a clone action against a TransportPlan with full fallback.
 
-        Args:
-            repo_url_base: Base repository reference (owner/repo)
-            target_path: Target path for cloning
-            progress_reporter: GitProgressReporter instance for progress updates
-            dep_ref: DependencyReference for platform/protocol decisions
-            verbose_callback: Optional callable for verbose logging (receives str messages)
-            **clone_kwargs: Additional arguments for Repo.clone_from
+        Owns:
+          - TransportPlan resolution + per-dep transport warnings.
+          - Per-attempt URL + env construction.
+          - ADO bearer in-attempt retry on 401/Unauthorized.
+          - Cross-protocol fallback warning on protocol switch.
+          - Aggregate error construction on exhaustion.
 
-        Returns:
-            Repo: Successfully cloned repository
+        The provided ``clone_action`` performs the actual clone for one
+        attempt. Working-tree clones pass an action that wraps
+        ``Repo.clone_from``; bare clones pass an action that wraps
+        ``subprocess.run([git, "clone", "--bare", ...])``. The template
+        catches both ``GitCommandError`` (GitPython) and
+        ``subprocess.CalledProcessError`` (subprocess) so either action
+        composes correctly with ADO bearer retry and protocol fallback.
 
         Raises:
-            RuntimeError: If the planned attempt(s) all fail.
+            RuntimeError: If all planned attempts fail.
         """
-        last_error = None
+        last_error: Exception | None = None
         is_ado = dep_ref and dep_ref.is_azure_devops()
 
         dep_host = dep_ref.host if dep_ref else None
@@ -723,21 +748,25 @@ class GitHubPackageDownloader:
 
             try:
                 _debug(f"Attempting clone with {attempt.label} (URL sanitized)")
-                repo = Repo.clone_from(
-                    url,
-                    target_path,
-                    env=_env_for(attempt),
-                    progress=progress_reporter,
-                    **clone_kwargs,
-                )
+                clone_action(url, _env_for(attempt), target_path)
                 if verbose_callback:
                     display = self._sanitize_git_error(url) if attempt.use_token else url
                     verbose_callback(f"Cloned from: {display}")
-                return repo
-            except GitCommandError as e:
+                return
+            except (GitCommandError, subprocess.CalledProcessError) as e:
                 # ADO bearer fallback for clone (mirrors validation/list_remote_refs):
-                # PAT was rejected -> silently retry this attempt with az-cli bearer.
+                # PAT was rejected -> silently retry with az-cli bearer.
+                # Append e.stderr to err_msg because str(CalledProcessError)
+                # does NOT include stderr by default; without this, the bare
+                # clone path would never trigger bearer retry on PAT 401.
                 err_msg = str(e)
+                stderr_attr = getattr(e, "stderr", None)
+                if stderr_attr:
+                    if isinstance(stderr_attr, bytes):
+                        with contextlib.suppress(Exception):
+                            err_msg += " " + stderr_attr.decode("utf-8", errors="replace")
+                    else:
+                        err_msg += " " + str(stderr_attr)
                 if (
                     is_ado
                     and attempt.use_token
@@ -768,13 +797,11 @@ class GitHubPackageDownloader:
                                     auth_scheme="bearer",
                                 )
                                 bearer_env = {**self.git_env, **build_ado_bearer_git_env(bearer)}
-                                repo = Repo.clone_from(
-                                    bearer_url,
-                                    target_path,
-                                    env=bearer_env,
-                                    progress=progress_reporter,
-                                    **clone_kwargs,
-                                )
+                                # Bearer retry composes with bare-action's tier
+                                # ladder: clone_action will rmtree any partial
+                                # state (tier-1 init+fetch) before re-attempting
+                                # against the bearer URL. See 6.15.
+                                clone_action(bearer_url, bearer_env, target_path)
                                 self.auth_resolver.emit_stale_pat_diagnostic(
                                     dep_host or "dev.azure.com"
                                 )
@@ -782,8 +809,12 @@ class GitHubPackageDownloader:
                                     verbose_callback(
                                         "Cloned from: (sanitized) via AAD bearer fallback"
                                     )
-                                return repo
-                            except (AzureCliBearerError, GitCommandError):
+                                return
+                            except (
+                                AzureCliBearerError,
+                                GitCommandError,
+                                subprocess.CalledProcessError,
+                            ):
                                 pass
                     except ImportError:
                         pass
@@ -794,75 +825,58 @@ class GitHubPackageDownloader:
                     break
 
         # All planned attempts failed (or strict-mode single failure)
-        if plan.strict and len(plan.attempts) >= 1:
-            tried = plan.attempts[0].label
-            error_msg = f"Failed to clone repository {repo_url_base} via {tried}. "
-            if plan.fallback_hint:
-                error_msg += plan.fallback_hint + " "
-        else:
-            error_msg = f"Failed to clone repository {repo_url_base} using all available methods. "
-        configured_host = os.environ.get("GITHUB_HOST", "")
-        if is_ado and not self.has_ado_token:
-            host = dep_host or "dev.azure.com"
-            error_msg += self.auth_resolver.build_error_context(
-                host,
-                "clone",
-                org=dep_ref.ado_organization if dep_ref else None,
-                port=dep_ref.port if dep_ref else None,
-                dep_url=dep_ref.repo_url if dep_ref else None,
-            )
-        elif is_generic:
-            if dep_host:
-                host_info = self.auth_resolver.classify_host(
-                    dep_host,
-                    port=dep_ref.port if dep_ref else None,
-                )
-                host_name = host_info.display_name
-            else:
-                host_name = "the target host"
-            error_msg += (
-                f"For private repositories on {host_name}, configure SSH keys or a git credential helper. "
-                f"APM delegates authentication to git for non-GitHub/ADO hosts."
-            )
-        elif (
-            configured_host
-            and dep_host
-            and dep_host == configured_host
-            and configured_host != "github.com"
-        ):
-            suggested = f"github.com/{repo_url_base}"
-            if dep_ref and dep_ref.virtual_path:
-                suggested += f"/{dep_ref.virtual_path}"
-            error_msg += (
-                f"GITHUB_HOST is set to '{configured_host}', so shorthand dependencies "
-                f"(without a hostname) resolve against that host. "
-                f"If this package lives on a different server (e.g., github.com), "
-                f"use the full hostname in apm.yml: {suggested}"
-            )
-        elif not has_token:
-            # No auth was resolved (neither env var nor credential helper).
-            # Guide the user through setting up authentication.
-            host = dep_host or default_host()
-            org = dep_ref.repo_url.split("/")[0] if dep_ref and dep_ref.repo_url else None
-            error_msg += self.auth_resolver.build_error_context(
-                host,
-                "clone",
-                org=org,
-                port=dep_ref.port if dep_ref else None,
-                dep_url=dep_ref.repo_url if dep_ref else None,
-            )
-        else:
-            error_msg += "Please check repository access permissions and authentication setup."
-
-        if last_error:
-            sanitized_error = self._sanitize_git_error(str(last_error))
-            error_msg += f" Last error: {sanitized_error}"
+        error_msg = build_clone_failure_message(
+            repo_url_base=repo_url_base,
+            plan=plan,
+            dep_ref=dep_ref,
+            dep_host=dep_host,
+            is_ado=bool(is_ado),
+            is_generic=is_generic,
+            has_ado_token=self.has_ado_token,
+            has_token=has_token,
+            auth_resolver=self.auth_resolver,
+            configured_github_host=os.environ.get("GITHUB_HOST", ""),
+            default_host_fn=default_host,
+            last_error=last_error,
+            sanitize_git_error=self._sanitize_git_error,
+        )
 
         raise RuntimeError(error_msg)
 
     # ------------------------------------------------------------------
-    # Remote ref enumeration (no clone required)
+    # Bare-clone helpers (#1126: subdir-agnostic shared cache)
     # ------------------------------------------------------------------
+
+    def _bare_clone_with_fallback(
+        self,
+        repo_url_base: str,
+        bare_target: Path,
+        *,
+        dep_ref: DependencyReference,
+        ref: str | None,
+        is_commit_sha: bool,
+    ) -> None:
+        """Thin delegate to :func:`bare_cache.bare_clone_with_fallback` (kept on the class so test patches still work)."""
+        bare_clone_with_fallback(
+            self._execute_transport_plan,
+            repo_url_base,
+            bare_target,
+            dep_ref=dep_ref,
+            ref=ref,
+            is_commit_sha=is_commit_sha,
+        )
+
+    def _materialize_from_bare(
+        self,
+        bare_path: Path,
+        consumer_dir: Path,
+        *,
+        ref: str | None,
+        env: dict[str, str],
+        known_sha: str | None = None,
+    ) -> str:
+        """Thin delegate to :func:`bare_cache.materialize_from_bare` (kept on the class so test patches still work)."""
+        return materialize_from_bare(bare_path, consumer_dir, ref=ref, env=env, known_sha=known_sha)
 
     @staticmethod
     def _parse_ls_remote_output(output: str) -> list[RemoteRef]:
@@ -1163,7 +1177,7 @@ class GitHubPackageDownloader:
 
         finally:
             if temp_dir and temp_dir.exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                _rmtree(temp_dir)
 
         return ResolvedReference(
             original_ref=original_ref_str,
@@ -1665,54 +1679,68 @@ class GitHubPackageDownloader:
         from ..config import get_apm_temp_dir
 
         temp_dir = None
-        shared_clone_path: Path | None = None
+        shared_bare_path: Path | None = None
+        # WS2 path resolves the SHA from the BARE so we don't pay
+        # rev-parse twice (or open the working-tree Repo unnecessarily).
+        # See design.md sec 5.5: _ws2_resolved_commit threads the SHA past
+        # the generic Repo(temp_clone_path).head.commit.hexsha block below.
+        _ws2_resolved_commit: str | None = None
         try:
             if _persistent_checkout is not None:
                 # WS3: persistent cache hit -- use the cached checkout directly.
                 temp_clone_path = _persistent_checkout
             elif use_shared:
-                # Try shared clone path.  clone_fn encapsulates the full
-                # sparse-checkout -> fallback-clone logic.
-                def _shared_clone_fn(clone_target: Path) -> None:
-                    sparse_path = clone_target
-                    sparse_ok = self._try_sparse_checkout(dep_ref, sparse_path, subdir_path, ref)
-                    if sparse_ok:
-                        return
-                    # Sparse failed -- full clone into same target
-                    # (shared cache doesn't care about the sparse/full distinction)
-                    full_path = clone_target.parent / "repo_clone"
-                    is_commit_sha = ref and re.match(r"^[a-f0-9]{7,40}$", ref) is not None
-                    clone_kwargs = {"dep_ref": dep_ref}
-                    if is_commit_sha:
-                        clone_kwargs["no_checkout"] = True
-                    else:
-                        clone_kwargs["depth"] = 1
-                        if ref:
-                            clone_kwargs["branch"] = ref
-                    self._clone_with_fallback(dep_ref.repo_url, full_path, **clone_kwargs)
-                    if is_commit_sha:
-                        repo_obj = None
-                        try:
-                            repo_obj = Repo(full_path)
-                            repo_obj.git.checkout(ref)
-                        except Exception as e:
-                            raise RuntimeError(f"Failed to checkout commit {ref}: {e}") from e
-                        finally:
-                            _close_repo(repo_obj)
-                    # Move full clone into expected position (rename is atomic
-                    # on same filesystem).  If sparse path already exists from
-                    # the failed attempt, remove it first.
-                    if sparse_path.exists():
-                        _rmtree(sparse_path)
-                    full_path.rename(sparse_path)
+                # WS2 (#1126): shared cache holds BARE clones keyed by
+                # (host, owner, repo, ref). Each consumer materializes its
+                # own working tree from the bare; this is subdir-agnostic
+                # so two parallel consumers requesting different
+                # subdirectories of the same repo+ref can share one bare
+                # without racing on sparse-checkout. See design.md sec 5.5.
+                is_commit_sha = ref and re.match(r"^[a-f0-9]{7,40}$", ref) is not None
+
+                def _shared_bare_clone_fn(bare_target: Path) -> None:
+                    self._bare_clone_with_fallback(
+                        dep_ref.repo_url,
+                        bare_target,
+                        dep_ref=dep_ref,
+                        ref=ref,
+                        is_commit_sha=bool(is_commit_sha),
+                    )
 
                 try:
-                    shared_clone_path = shared_cache.get_or_clone(
-                        cache_host, cache_owner, cache_repo, ref, _shared_clone_fn
+                    shared_bare_path = shared_cache.get_or_clone(
+                        cache_host, cache_owner, cache_repo, ref, _shared_bare_clone_fn
                     )
                 except Exception as e:
                     raise RuntimeError(f"Failed to clone repository: {e}") from e
-                temp_clone_path = shared_clone_path
+
+                # Per-consumer materialization. mkdtemp gives a unique
+                # path so concurrent consumers do not collide. The bare
+                # is read-only after this point; only the consumer dir
+                # is written to.
+                temp_dir = tempfile.mkdtemp(dir=get_apm_temp_dir())
+                temp_clone_path = Path(temp_dir) / "consumer"
+                try:
+                    _ws2_resolved_commit = self._materialize_from_bare(
+                        shared_bare_path,
+                        temp_clone_path,
+                        ref=ref,
+                        env=self._git_env_dict(),
+                        # Only short-circuit SHA resolution when the user
+                        # pinned a full 40-char SHA. Abbreviated SHAs
+                        # (7-39 chars) must be resolved to the full
+                        # SHA against the bare so resolved_commit
+                        # matches `head.commit.hexsha` (always 40-char)
+                        # in lockfile comparisons. The bare's HEAD has
+                        # already been update-ref'd to the full SHA in
+                        # _bare_action, so rev-parse HEAD returns 40 chars.
+                        # Copilot review finding (#1135).
+                        known_sha=ref if (is_commit_sha and len(ref) == 40) else None,
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to prepare dependency from cached clone: {e}"
+                    ) from e
             else:
                 # Legacy per-dep clone path (no shared cache).
                 temp_dir = tempfile.mkdtemp(dir=get_apm_temp_dir())
@@ -1818,14 +1846,21 @@ class GitHubPackageDownloader:
 
             # Capture commit SHA; close the Repo object immediately so its file
             # handles are released before _rmtree() runs in the finally block.
-            repo = None
-            try:
-                repo = Repo(temp_clone_path)
-                resolved_commit = repo.head.commit.hexsha
-            except Exception:
-                resolved_commit = "unknown"
-            finally:
-                _close_repo(repo)
+            # WS2 path skips this because _materialize_from_bare already
+            # resolved the SHA from the bare (avoids opening Repo on the
+            # consumer dir, which leaks a Windows file handle that would
+            # block the rmtree below; see design.md sec 5.5).
+            if _ws2_resolved_commit is not None:
+                resolved_commit = _ws2_resolved_commit
+            else:
+                repo = None
+                try:
+                    repo = Repo(temp_clone_path)
+                    resolved_commit = repo.head.commit.hexsha
+                except Exception:
+                    resolved_commit = "unknown"
+                finally:
+                    _close_repo(repo)
 
             # Update progress - validating
             if progress_obj and progress_task_id is not None:
@@ -2017,7 +2052,7 @@ class GitHubPackageDownloader:
             )
         except RuntimeError:
             if target_path.exists():
-                shutil.rmtree(target_path, ignore_errors=True)
+                _rmtree(target_path)
             raise
         if progress_obj and progress_task_id is not None:
             progress_obj.update(progress_task_id, completed=70, total=100)
@@ -2025,7 +2060,7 @@ class GitHubPackageDownloader:
         validation_result = validate_apm_package(target_path)
         if not validation_result.is_valid:
             if target_path.exists():
-                shutil.rmtree(target_path, ignore_errors=True)
+                _rmtree(target_path)
             error_msg = f"Invalid APM package {dep_ref.repo_url}:\n"
             for error in validation_result.errors:
                 error_msg += f"  - {error}\n"
@@ -2267,7 +2302,7 @@ class GitHubPackageDownloader:
             # Remove .git directory to save space and prevent treating as a Git repository
             git_dir = target_path / ".git"
             if git_dir.exists():
-                shutil.rmtree(git_dir, ignore_errors=True)
+                _rmtree(git_dir)
 
         except GitCommandError as e:
             # Check if this might be a private repository access issue
@@ -2297,7 +2332,7 @@ class GitHubPackageDownloader:
         if not validation_result.is_valid:
             # Clean up on validation failure
             if target_path.exists():
-                shutil.rmtree(target_path, ignore_errors=True)
+                _rmtree(target_path)
 
             error_msg = f"Invalid APM package {dep_ref.repo_url}:\n"
             for error in validation_result.errors:
