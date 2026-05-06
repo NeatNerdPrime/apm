@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Explicit, auditable target resolution.** `apm install` and `apm compile` now resolve harness targets in a strict priority chain (`--target` flag > `apm.yml` `targets:` > auto-detect from filesystem signals) and print a one-line `[i] Targets: ...  (source: ...)` provenance summary so the chosen path is never silently inferred. Empty repositories with no signal now exit 2 with a teaching message instead of silently defaulting to `copilot`. Adds `apm targets` discovery command and `apm compile --all` flag (deprecates `--target all`). (#1165, closes #1154, closes #1122, closes #1130, closes #518, closes #888, closes #891, closes #650, closes #1056)
+- **`apm init` target-selection prompt.** Interactive init now presents a numbered-toggle checklist pre-seeded from filesystem signals (or the existing `target:` on re-init) so users land in Tier 2 (`apm.yml target:`) by default. New `--target` flag for scripted use. (#1165)
+
 ### Fixed
 
 - **`apm audit --ci` no longer silently skips when no org policy is resolved** -- `no_git_remote` / `absent` / `empty` auto-discovery outcomes now emit a `[!]` warning to stderr by default and honour `policy.fetch_failure_default: block` to fail closed (exit 1); JSON/SARIF on stdout stays clean. (#1159)
