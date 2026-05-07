@@ -56,6 +56,16 @@
 #              owner: beta-org
 #              packages:
 #                - beta-org/beta-pkg
+#
+# 4. Slim bundle for a single harness (recommended when the workflow
+#    targets one engine -- avoids packing every harness layout):
+#
+#    imports:
+#      - uses: shared/apm.md
+#        with:
+#          target: copilot
+#          packages:
+#            - microsoft/apm-sample-package
 
 import-schema:
   packages:
@@ -132,6 +142,21 @@ import-schema:
           items:
             type: string
           required: true
+
+  # APM compilation target (which agent harness layouts to deploy)
+  target:
+    type: string
+    required: false
+    default: all
+    description: >
+      Target harness(es) for APM compilation. Controls which agent config
+      directories are generated in the bundle. Single token or comma-separated
+      list. Valid tokens: copilot, claude, cursor, codex, opencode, gemini,
+      windsurf, agent-skills, all. Default: all (every supported harness).
+      Set this to match the engine your gh-aw workflow targets for smaller,
+      faster bundles. The shared workflow runs apm-action in isolated mode,
+      so any apm.yml in the consumer repo is intentionally ignored -- this
+      input is the sole target signal.
 
 jobs:
   apm-prep:
@@ -262,7 +287,7 @@ jobs:
           isolated: 'true'
           pack: 'true'
           archive: 'true'
-          target: all
+          target: ${{ github.aw.import-inputs.target || 'all' }}
           working-directory: /tmp/gh-aw/apm-workspace
       - name: Upload APM bundle artifact
         if: success()
