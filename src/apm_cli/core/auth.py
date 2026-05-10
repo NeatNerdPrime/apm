@@ -324,6 +324,7 @@ class AuthResolver:
         *,
         org: str | None = None,
         port: int | None = None,
+        path: str | None = None,
         unauth_first: bool = False,
         verbose_callback: Callable[[str], None] | None = None,
     ) -> T:
@@ -334,9 +335,14 @@ class AuthResolver:
         host:
             Target git host.
         operation:
-            ``operation(token, git_env) -> T`` — the work to do.
+            ``operation(token, git_env) -> T`` -- the work to do.
         org:
             Optional organisation for per-org token lookup.
+        path:
+            Optional repository path (``org/repo``) included in the
+            ``git credential fill`` request so helpers configured with
+            ``credential.useHttpPath = true`` can disambiguate per-URL
+            (notably Git Credential Manager for multi-account users).
         unauth_first:
             If *True*, try unauthenticated first (saves rate limits, EMU-safe).
         verbose_callback:
@@ -360,9 +366,11 @@ class AuthResolver:
 
             Walks the secondary chain in order: gh CLI (GitHub-like hosts;
             internal guard short-circuits unsupported hosts), then
-            ``git credential fill``. Sources already obtained from a
-            secondary chain (``gh-auth-token``, ``git-credential-fill``,
-            ``none``) skip retry to avoid double-invocation.
+            ``git credential fill`` (with ``path`` when known so
+            helpers can disambiguate per-URL). Sources already obtained
+            from a secondary chain (``gh-auth-token``,
+            ``git-credential-fill``, ``none``) skip retry to avoid
+            double-invocation.
             """
             if auth_ctx.source in ("gh-auth-token", "git-credential-fill", "none"):
                 raise exc
@@ -381,9 +389,10 @@ class AuthResolver:
                     gh_token,
                     self._build_git_env(gh_token, scheme="basic", host_kind=host_info.kind),
                 )
-            _log(f"trying git credential fill for {host_info.display_name}")
+            path_suffix = f" (path={path})" if path else ""
+            _log(f"trying git credential fill for {host_info.display_name}{path_suffix}")
             cred = self._token_manager.resolve_credential_from_git(
-                host_info.host, port=host_info.port
+                host_info.host, port=host_info.port, path=path
             )
             if cred:
                 _log(f"git credential fill resolved a credential for {host_info.display_name}")
@@ -718,6 +727,15 @@ class AuthResolver:
 
         # 4. Git credential helper (not for ADO)
         if host_info.kind not in ("ado",):
+            # Note: path= is intentionally omitted here. _resolve_token is the
+            # primary credential-resolution leg invoked once per host; it has
+            # no per-call repository context. The fallback leg in
+            # _try_credential_fallback re-invokes resolve_credential_from_git
+            # WITH path= when the primary credential is rejected, so GCM
+            # multi-account users still get per-URL disambiguation -- they
+            # just pay one extra round-trip on the first miss. Adding path=
+            # here would require threading repo context through every
+            # resolve() call site, which is disproportionate to the benefit.
             credential = self._token_manager.resolve_credential_from_git(
                 host_info.host, port=host_info.port
             )
