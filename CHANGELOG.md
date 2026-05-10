@@ -11,10 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Virtual subdirectory and raw-file packages now resolve from self-hosted Git services (Gitea, Gogs) via raw URL with API v1/v3 fallback. (#587)
 - `shared/apm.md` gh-aw shared workflow exposes a `target:` import input (default `all`) so consumer workflows can ship slim, single-harness bundles instead of always packing every layout. (#1184)
+- **GitLab host support:** `gitlab.com` and self-managed instances (via `GITLAB_HOST` / `APM_GITLAB_HOSTS`) use GitLab REST **v4** for `marketplace.json` and install-time raw file reads; nested GitLab group paths are disambiguated in dependency references with object-form `git:` + `path:` where shorthand is ambiguous. GitHub, GHES, Azure DevOps, and registry-proxy behavior remain unchanged. (#1149)
+- **`git: parent` monorepo transitive dependency inheritance:** packages in a git monorepo can reference sibling paths via `{ git: parent, path: ... }` without repeating the full `git:` URL; the lockfile stores expanded host, repository, subdirectory path, and resolved ref/commit like other virtual git dependencies (no `parent` sentinel as durable identity). (#1149)
 - If you use the `gh` CLI, APM is now zero-config for private GitHub packages on github.com, `*.ghe.com`, and GHES: APM uses your active `gh auth login` token (`gh auth token --hostname <host>`) before falling back to `git credential fill`. Silently skipped when `gh` is not installed or not logged in for the host. (#630)
+
+### Changed
+
+- `apm marketplace browse/search/add/update` route through the registry proxy when `PROXY_REGISTRY_URL` is set; `PROXY_REGISTRY_ONLY=1` blocks direct GitHub and GitLab host API fallbacks. (#1149)
+- Registry proxy now warns when `PROXY_REGISTRY_TOKEN` is set and `PROXY_REGISTRY_URL` uses `http://`, since the bearer token would be transmitted in plaintext; set `PROXY_REGISTRY_ALLOW_HTTP=1` to silence the warning for trusted internal proxies. (#1149)
 
 ### Fixed
 
+- `apm marketplace add` accepts GitLab-class hosts (`gitlab.com` and self-managed instances configured via `GITLAB_HOST` / `APM_GITLAB_HOSTS`); unsupported generic hosts now show separate recovery hints for GHES (`GITHUB_HOST`) and self-managed GitLab instead of only `GITHUB_HOST`. (#1149)
+- **GitLab monorepo marketplaces:** `apm install plugin@marketplace` now resolves plugins whose sources live in a subdirectory of the marketplace repository on GitLab-class hosts (`gitlab.com` and self-managed GitLab when classified as GitLab), matching explicit `git:` + `path:` semantics without requiring that hand-written object form. (#1149)
 - `apm install` now rejects unsupported flat-format `dependencies` (e.g. `dependencies: [owner/repo]`) with a clear error and structured-format hint instead of silently ignoring them; the resolver also surfaces `ValueError` from malformed transitive manifests as warnings instead of swallowing them. (#1189)
 - `shared/apm.md` no longer wraps the `target` input in a `|| 'all'` fallback. The defensive expression broke gh-aw's bare-expression substitution regex, causing consumer-supplied `target:` values to be silently dropped; the `import-schema` default already covers the omitted-input case. (#1185)
 - `apm install --target all` no longer enumerates the experimental `copilot-cowork` target, which was crashing project-scope installs with a "requires --global" error and made `gh aw` workflows that pin `target: all` unusable. (#1191)
