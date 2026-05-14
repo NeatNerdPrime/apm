@@ -407,6 +407,12 @@ def _check_includes_consent(
     )
 
 
+#: Prefix used in the drift :class:`CheckResult` message when the check is
+#: skipped due to a cold cache.  ``audit.py`` imports this to detect the
+#: skip case without comparing against a raw string literal.
+DRIFT_SKIP_PREFIX = "drift skipped"
+
+
 def _check_drift(
     project_root: Path,
     lockfile: LockFile,
@@ -421,8 +427,11 @@ def _check_drift(
     output format of their choice (text/json/sarif) without re-running
     the replay.
 
-    Cache-only by default: a missing cache entry produces a check
-    failure rather than a network fetch (audit must be deterministic).
+    Cache-only by default: a missing cache entry skips the check with
+    an informational message rather than failing it.  Drift can only
+    run once the local cache has been warmed by ``apm install``; until
+    then the audit remains non-blocking so CI does not red-mark a
+    fresh checkout that has never installed.
     """
     from ..deps.lockfile import get_lockfile_path
     from ..install.drift import (
@@ -444,13 +453,14 @@ def _check_drift(
 
     try:
         scratch = run_replay(config, logger)
-    except CacheMissError as exc:
+    except CacheMissError:
         return (
             CheckResult(
                 name="drift",
-                passed=False,
+                passed=True,
                 message=(
-                    f"drift replay aborted: {exc}; run 'apm install' to refresh apm_modules cache"
+                    f"{DRIFT_SKIP_PREFIX}: install cache not populated "
+                    "(run 'apm install' first or pass --no-drift)"
                 ),
             ),
             [],
