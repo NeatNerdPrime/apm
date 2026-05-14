@@ -89,6 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `apm marketplace add` accepts GitLab-class hosts; unsupported generic hosts now show separate recovery hints for GHES (`GITHUB_HOST`) and self-managed GitLab instead of only `GITHUB_HOST`. (#1149)
 - Realigned the integration suite with current product contracts: copilot-target detection requires `.github/copilot-instructions.md` (post-#1154), `apm marketplace build` is removed in favor of `apm pack`, ADO virtual collections use the SUBDIRECTORY layout (post-#1094), and the `repo:` apm.yml key is replaced by `git:`. (#1257, #1261, #1264)
 - `triage-panel` scheduled sweep now paginates oldest-first via GitHub MCP `search_issues` with `-label:status/triaged sort:created-asc`, so daily runs drain the untriaged backlog instead of processing one issue per cron tick. (#1193, #1194)
+- **Policy `unmanaged_files`:** Child policies that omit the block (or use an empty mapping) under `extends:` inherit the parent org settings transparently, fixing silent downgrades such as losing `action: deny`; values that are not YAML mappings (lists or scalars) are rejected with a recovery hint. (#1198, #1248)
 
 ## [0.12.4] - 2026-05-07
 
