@@ -17,6 +17,7 @@ Covers the selection matrix from issue microsoft/apm#778:
 
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional  # noqa: F401, UP035
 from unittest.mock import patch
 
@@ -354,22 +355,30 @@ class TestGitConfigInsteadOfResolver:
             resolver.resolve("https://gitlab.com/acme/lib")
             assert run.call_count == 1
 
-    def test_uses_normal_env_not_locked_down(self):
-        """The resolver MUST use the process env so user .gitconfig is visible.
+    def test_uses_sanitized_normal_env(self):
+        """The resolver keeps user config while removing repository state.
 
         The downloader's locked-down git_env sets GIT_CONFIG_GLOBAL=/dev/null,
         which would suppress user insteadOf rewrites. Issue #328 stays broken
-        unless the resolver runs with the normal env (no env= override).
+        unless the resolver starts from the normal environment.
         """
         resolver = GitConfigInsteadOfResolver()
-        with patch("apm_cli.deps.transport_selection.subprocess.run") as run:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GIT_CONFIG_GLOBAL": "/home/test/.gitconfig",
+                    "GIT_DIR": "/hook/repo.git",
+                },
+            ),
+            patch("apm_cli.deps.transport_selection.subprocess.run") as run,
+        ):
             run.return_value.returncode = 0
             run.return_value.stdout = ""
             resolver.resolve("https://github.com/owner/repo")
             _args, kwargs = run.call_args
-            # subprocess.run must be called WITHOUT env override so the
-            # user's normal git config is visible.
-            assert "env" not in kwargs or kwargs["env"] is None
+            assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == "/home/test/.gitconfig"
+            assert "GIT_DIR" not in kwargs["env"]
 
     def test_resolve_returns_none_when_no_rewrites(self):
         resolver = GitConfigInsteadOfResolver()

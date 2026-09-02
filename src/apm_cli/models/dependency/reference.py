@@ -650,12 +650,22 @@ class DependencyReference(ProviderCoordinateMixin):
         else:
             return  # bare shorthand or other form -- not in scope
 
-        path_part = path_part.split("#")[0].split("?")[0]
-        decoded_path = urllib.parse.unquote(path_part)
-        while decoded_path != path_part:
-            path_part = decoded_path
-            decoded_path = urllib.parse.unquote(path_part)
-        segments = [s for s in path_part.replace("\\", "/").split("/") if s]
+        path_part = path_part.split("#")[0].split("?")[0].strip("/")
+        if not path_part:
+            return
+        from apm_cli.utils.path_security import PathTraversalError, decode_url_path_segments
+
+        try:
+            segments = list(
+                decode_url_path_segments(
+                    path_part,
+                    context="dependency repository URL path",
+                )
+            )
+        except PathTraversalError as exc:
+            if "residual percent-encoding" in str(exc):
+                DependencyReference._raise_embedded_subpath_error(raw)
+            raise
         if len(segments) < 3:
             return  # too few segments to contain an interior primitive name
 
