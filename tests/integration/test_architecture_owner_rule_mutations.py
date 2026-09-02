@@ -585,6 +585,22 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Ref reuse drops the semver preflight eligibility gate.",
     ),
     MutationCase(
+        guard_id="transport-platform-git-url-rewrite-safety",
+        rule_id="transport-platform-git-child-environment",
+        path="src/apm_cli/deps/git_auth_env.py",
+        old='class GitAuthEnvBuilder:\n    """Build the various git env dicts the downloader needs."""',
+        new=(
+            "class GitAuthEnvBuilder:\n"
+            '    """Build the various git env dicts the downloader needs."""\n\n'
+            "    @staticmethod\n"
+            "    def has_https_to_http_url_rewrite(\n"
+            "        remote_url: str, env: dict[str, str]\n"
+            "    ) -> bool:\n"
+            "        return False"
+        ),
+        intent="GitAuthEnvBuilder regains a parallel URL rewrite safety policy.",
+    ),
+    MutationCase(
         guard_id="transport-platform-github-throttle",
         rule_id="transport-platform-github-throttle",
         path="src/apm_cli/deps/download_strategies.py",

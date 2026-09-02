@@ -127,7 +127,77 @@ class _GitProgress(Protocol):
         """Return a callback that parses one Git progress line."""
 
 
-def _append_parent_safe_git_config(env: dict[str, str], remote_url: str) -> None:
+def _read_effective_git_url_rewrites(env: dict[str, str]) -> tuple[tuple[str, str], ...]:
+    """Return every URL rewrite visible to a Git child using *env*."""
+    try:
+        result = subprocess.run(
+            (
+                get_git_executable(),
+                "config",
+                "--null",
+                "--get-regexp",
+                r"^url\..*\.insteadOf$",
+            ),
+            capture_output=True,
+            check=False,
+            env=env,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("Unable to verify Git URL rewrite safety") from exc
+    if result.returncode == 1:
+        return ()
+    if result.returncode != 0 or not isinstance(result.stdout, bytes):
+        raise ValueError("Unable to verify Git URL rewrite safety")
+
+    rewrites: list[tuple[str, str]] = []
+    for entry in result.stdout.split(b"\0"):
+        if not entry:
+            continue
+        if b"\n" not in entry:
+            raise ValueError("Unable to verify Git URL rewrite safety")
+        key, prefix = entry.split(b"\n", 1)
+        try:
+            key_text = key.decode("utf-8")
+            prefix_text = prefix.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Unable to verify Git URL rewrite safety") from exc
+        normalized = key_text.lower()
+        if not normalized.startswith("url.") or not normalized.endswith(".insteadof"):
+            raise ValueError("Unable to verify Git URL rewrite safety")
+        replacement = key_text[4 : -len(".insteadOf")]
+        if not replacement or not prefix_text:
+            raise ValueError("Unable to verify Git URL rewrite safety")
+        rewrites.append((replacement, prefix_text))
+    return tuple(rewrites)
+
+
+def validate_git_url_rewrite_safety(remote_url: str, env: dict[str, str]) -> None:
+    """Reject credential-bearing or HTTPS-downgrading effective URL rewrites."""
+    try:
+        source = urlsplit(remote_url)
+        rewrites = _read_effective_git_url_rewrites(env)
+    except ValueError as exc:
+        if str(exc) == "Unable to verify Git URL rewrite safety":
+            raise
+        raise ValueError("Unable to verify Git URL rewrite safety") from exc
+
+    for replacement, prefix in rewrites:
+        if not remote_url.startswith(prefix):
+            continue
+        try:
+            target = urlsplit(replacement)
+        except ValueError as exc:
+            raise ValueError("Unable to verify Git URL rewrite safety") from exc
+        if target.scheme.lower() in {"http", "https"} and (
+            target.username is not None or target.password is not None
+        ):
+            raise ValueError("Git URL rewrite replacement must not contain credentials")
+        if source.scheme.lower() == "https" and target.scheme.lower() == "http":
+            raise ValueError("HTTPS Git remote must not rewrite to insecure HTTP")
+
+
+def _append_parent_git_config(env: dict[str, str]) -> None:
     """Retain parent config selection and URL rewrites, never auth channels."""
     for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
         if name not in env and name in os.environ:
@@ -153,16 +223,6 @@ def _append_parent_safe_git_config(env: dict[str, str], remote_url: str) -> None
             and (key, value) not in existing
         ):
             continue
-        replacement = key[4 : -len(".insteadOf")]
-        if remote_url.startswith(value):
-            source = urlsplit(remote_url)
-            target = urlsplit(replacement)
-            if target.scheme.lower() in {"http", "https"} and (
-                target.username is not None or target.password is not None
-            ):
-                raise ValueError("Git URL rewrite replacement must not contain credentials")
-            if source.scheme.lower() == "https" and target.scheme.lower() == "http":
-                raise ValueError("HTTPS Git remote must not rewrite to insecure HTTP")
         env[f"GIT_CONFIG_KEY_{target_count}"] = key
         env[f"GIT_CONFIG_VALUE_{target_count}"] = value
         target_count += 1
@@ -194,7 +254,8 @@ def clone_git_worktree(
     args.extend(("--", url, str(target)))
     clone_env = git_subprocess_env(env)
     if env is not None:
-        _append_parent_safe_git_config(clone_env, url)
+        _append_parent_git_config(clone_env)
+    validate_git_url_rewrite_safety(url, clone_env)
     if progress is None:
         subprocess.run(
             args,

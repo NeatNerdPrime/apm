@@ -49,6 +49,7 @@ from scripts.architecture_linter.models import Rule, Violation
 
 _RID_HOST_CRED = "transport-platform-host-credential-resolution"
 _RID_GIT_CHILD_ENV = "transport-platform-git-child-environment"
+_RID_GIT_URL_REWRITE = "transport-platform-git-url-rewrite-safety"
 _RID_ARTIFACTORY_NETRC = "transport-platform-artifactory-netrc-isolation"
 
 
@@ -326,8 +327,23 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 '"GIT_OBJECT_DIRECTORY"',
                 "def clone_git_worktree(",
                 "env=git_subprocess_env(env)",
+                "def validate_git_url_rewrite_safety(",
+                "validate_git_url_rewrite_safety(url, clone_env)",
             ),
-            "utils/git_env.py must own ambient repository-state isolation",
+            "utils/git_env.py must own repository-state and URL rewrite safety",
+        )
+    )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            "src/apm_cli/core/auth.py",
+            (
+                "from ..utils.git_env import validate_git_url_rewrite_safety",
+                "validate_git_url_rewrite_safety(remote_url, env)",
+            ),
+            "AuthResolver must route URL rewrite safety through utils/git_env.py",
         )
     )
     for path, needles in (
@@ -415,6 +431,19 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
             ("src/apm_cli/deps/github_downloader.py",),
             re.compile(r"env\s*=\s*\{\*\*os\.environ"),
             "Git downloader subprocess environments must use utils/git_env.py",
+            exempt=False,
+        )
+    )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            _src_python(provider, exclude={"src/apm_cli/utils/git_env.py"}),
+            re.compile(
+                r"^\s*def (?:has_https_to_http_url_rewrite|validate_git_url_rewrite_safety)\("
+            ),
+            "Git URL rewrite safety must stay owned by utils/git_env.py",
             exempt=False,
         )
     )
@@ -724,8 +753,8 @@ RULES: tuple[Rule, ...] = (
     Rule(
         id=_RID_GIT_CHILD_ENV,
         group=GROUP,
-        guard_ids=(_RID_GIT_CHILD_ENV,),
-        description="Git child processes cannot inherit repository-locating state.",
+        guard_ids=(_RID_GIT_CHILD_ENV, _RID_GIT_URL_REWRITE),
+        description=("Git child processes cannot inherit repository state or unsafe URL rewrites."),
         check=_check_git_child_environment,
     ),
     Rule(

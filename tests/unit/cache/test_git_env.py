@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -22,6 +23,14 @@ from apm_cli.utils.git_env import (
 # Compatibility Gate via `pytest -m windows_compat`; also runs on
 # every other OS.
 pytestmark = pytest.mark.windows_compat
+_REAL_SUBPROCESS_RUN = subprocess.run
+
+
+def _run_real_git_config_and_fake_clone(args, **kwargs):
+    """Use real local config parsing while preventing any clone network I/O."""
+    if len(args) > 1 and args[1] == "config":
+        return _REAL_SUBPROCESS_RUN(args, **kwargs)
+    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
 
 class TestGetGitExecutable:
@@ -168,9 +177,12 @@ class TestGitSubprocessEnv:
         assert git_subprocess_error_text(exc) == "fatal: missing ref"
 
     def test_clone_retains_url_rewrite_without_restoring_parent_auth(self, tmp_path) -> None:
+        config = tmp_path / "gitconfig"
+        config.write_text("", encoding="ascii")
         parent = {
+            "PATH": os.environ["PATH"],
             "GITHUB_TOKEN": "ambient-token",
-            "GIT_CONFIG_GLOBAL": "/fixture/gitconfig",
+            "GIT_CONFIG_GLOBAL": str(config),
             "GIT_HTTP_EXTRAHEADER": "Authorization: Basic stale",
             "GIT_CONFIG_PARAMETERS": "'http.extraheader=Authorization: Basic stale'",
             "GIT_CONFIG_COUNT": "2",
@@ -187,8 +199,10 @@ class TestGitSubprocessEnv:
         }
         with (
             patch.dict(os.environ, parent, clear=True),
-            patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
-            patch("apm_cli.utils.git_env.subprocess.run") as run,
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ) as run,
         ):
             clone_git_worktree(
                 "https://git.example.com/acme/repo",
@@ -196,11 +210,11 @@ class TestGitSubprocessEnv:
                 env=resolved,
             )
 
-        child = run.call_args.kwargs["env"]
+        child = run.call_args_list[-1].kwargs["env"]
         assert "GITHUB_TOKEN" not in child
         assert "GIT_HTTP_EXTRAHEADER" not in child
         assert "GIT_CONFIG_PARAMETERS" not in child
-        assert child["GIT_CONFIG_GLOBAL"] == "/fixture/gitconfig"
+        assert child["GIT_CONFIG_GLOBAL"] == str(config)
         assert child["GIT_CONFIG_COUNT"] == "2"
         assert child["GIT_CONFIG_KEY_1"] == "url.file:///fixture/.insteadOf"
         assert child["GIT_CONFIG_VALUE_1"] == "https://git.example.com/acme/repo"
@@ -216,14 +230,17 @@ class TestGitSubprocessEnv:
         self, tmp_path, replacement: str, message: str
     ) -> None:
         parent = {
+            "PATH": os.environ["PATH"],
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": f"url.{replacement}.insteadOf",
             "GIT_CONFIG_VALUE_0": "https://git.example.com/acme/repo",
         }
         with (
             patch.dict(os.environ, parent, clear=True),
-            patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
-            patch("apm_cli.utils.git_env.subprocess.run") as run,
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ) as run,
             pytest.raises(ValueError, match=message),
         ):
             clone_git_worktree(
@@ -231,7 +248,71 @@ class TestGitSubprocessEnv:
                 tmp_path / "clone",
                 env={"PATH": os.environ.get("PATH", "")},
             )
-        run.assert_not_called()
+        assert all(call.args[0][1] == "config" for call in run.call_args_list)
+
+    @pytest.mark.parametrize("source", ("inherited", "existing"))
+    @pytest.mark.parametrize(
+        ("replacement", "message"),
+        (
+            ("https://token@example.com/repo", "must not contain credentials"),
+            ("http://example.com/repo", "must not rewrite to insecure HTTP"),
+        ),
+    )
+    def test_clone_rejects_unsafe_effective_url_rewrites(
+        self,
+        tmp_path,
+        source: str,
+        replacement: str,
+        message: str,
+    ) -> None:
+        rewrite_env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": f"url.{replacement}.insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://git.example.com/acme/repo",
+        }
+        parent = rewrite_env if source == "inherited" else {"PATH": os.environ["PATH"]}
+        supplied = None if source == "inherited" else rewrite_env
+        with (
+            patch.dict(os.environ, parent, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ) as run,
+            pytest.raises(ValueError, match=message),
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=supplied,
+            )
+
+        assert all(call.args[0][1] == "config" for call in run.call_args_list)
+
+    def test_clone_preserves_safe_existing_url_rewrite(self, tmp_path) -> None:
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "url.file:///fixture/.insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://git.example.com/acme/repo",
+        }
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ) as run,
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+        child = run.call_args_list[-1].kwargs["env"]
+        replacement = child["GIT_CONFIG_KEY_0"][4 : -len(".insteadOf")]
+        assert urlsplit(replacement).scheme == "file"
+        assert urlsplit(child["GIT_CONFIG_VALUE_0"]).hostname == "git.example.com"
 
     def test_clone_streams_git_progress_to_reporter(self, tmp_path) -> None:
         reporter = MagicMock()
@@ -244,6 +325,7 @@ class TestGitSubprocessEnv:
 
         with (
             patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
+            patch("apm_cli.utils.git_env.validate_git_url_rewrite_safety"),
             patch("apm_cli.utils.git_env.subprocess.Popen", return_value=process),
             patch("git.cmd.handle_process_output", side_effect=stream),
         ):

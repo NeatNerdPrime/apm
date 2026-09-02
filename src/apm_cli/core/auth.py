@@ -1432,12 +1432,11 @@ class AuthResolver:
                 preserve_config_isolation=policy.preserve_config_isolation,
                 suppress_credential_helpers=policy.suppress_credential_helpers,
             )
-        if policy.reject_https_downgrade:
-            from ..deps.git_auth_env import GitAuthEnvBuilder
-
-            if GitAuthEnvBuilder.has_https_to_http_url_rewrite(remote_url, env):
-                raise ValueError("HTTPS Git remote is configured to rewrite to insecure HTTP")
         self._clear_platform_token_env(env, remove=True)
+        if policy.reject_https_downgrade:
+            from ..utils.git_env import validate_git_url_rewrite_safety
+
+            validate_git_url_rewrite_safety(remote_url, env)
         return env
 
     def _generic_credential_lookup_env(self) -> dict[str, str]:
