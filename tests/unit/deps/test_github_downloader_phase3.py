@@ -1342,7 +1342,7 @@ class TestDownloadPackage:
             patch("apm_cli.deps.github_downloader._rmtree"),
             patch("apm_cli.deps.package_validator.stamp_plugin_version"),
             patch("apm_cli.deps._shared._validate_and_load_package", return_value=pkg),
-            patch("apm_cli.utils.git_env.checkout_git_worktree") as checkout,
+            patch("apm_cli.deps.github_downloader.checkout_git_worktree") as checkout,
         ):
             downloader.download_package(dep, tmp_path / "pkg")
         checkout.assert_called_once_with(tmp_path / "pkg", sha, env=downloader.git_env)

@@ -309,7 +309,7 @@ class TestGitHubPackageDownloader:
                 "resolve_git_reference",
                 return_value=mock_resolved_ref,
             ),
-            patch("apm_cli.utils.git_env.checkout_git_worktree") as mock_checkout,
+            patch("apm_cli.deps.github_downloader.checkout_git_worktree") as mock_checkout,
         ):
             result = self.downloader.download_package("user/repo#abc123", target_path)
 
@@ -1095,7 +1095,7 @@ class TestSubdirectoryPackageCommitSHA:
 
         with (
             patch.object(downloader, "_clone_with_fallback") as mock_clone,
-            patch("apm_cli.utils.git_env.checkout_git_worktree") as mock_checkout,
+            patch("apm_cli.deps.github_downloader.checkout_git_worktree") as mock_checkout,
             patch("apm_cli.deps.github_downloader.validate_materialized_symlinks"),
         ):
             mock_clone.return_value = mock_repo
