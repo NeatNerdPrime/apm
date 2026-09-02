@@ -385,30 +385,12 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
             inv,
             _RID_GIT_CHILD_ENV,
             _paths_under(provider, "src/apm_cli/deps/", (".py",)),
-            re.compile(r"\.git\.checkout\("),
-            "GitPython checkout inherits ambient repository state; use checkout_git_worktree",
-            exempt=False,
-        )
-    )
-    findings.extend(
-        _forbid_scan(
-            provider,
-            inv,
-            _RID_GIT_CHILD_ENV,
-            _paths_under(provider, "src/apm_cli/deps/", (".py",)),
-            re.compile(r"\brepo\.(commit|head|active_branch|refs|tags)\b"),
-            "GitPython repository reads inherit ambient state; use utils/git_env",
-            exempt=False,
-        )
-    )
-    findings.extend(
-        _forbid_scan(
-            provider,
-            inv,
-            _RID_GIT_CHILD_ENV,
-            _paths_under(provider, "src/apm_cli/deps/", (".py",)),
-            re.compile(r"git\.cmd\.Git\(str\("),
-            "Path-scoped GitPython commands inherit ambient repository state",
+            re.compile(
+                r"\.git\.checkout\("
+                r"|\brepo\.(commit|head|active_branch|refs|tags)\b"
+                r"|git\.cmd\.Git\(str\("
+            ),
+            "Repository-scoped GitPython operations must use utils/git_env",
             exempt=False,
         )
     )
