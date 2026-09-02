@@ -116,9 +116,12 @@ apm marketplace add file:///srv/marketplaces/agent-forge.git --name agent-forge
 **Trust boundary.** APM forwards its authentication tokens
 (`GITHUB_APM_PAT`, `GITLAB_APM_PAT`, `ADO_APM_PAT`) only when the
 marketplace host is classified as GitHub, GitLab, or Azure DevOps.
-Other git hosts -- generic HTTPS, SSH, self-hosted -- are fetched via
-subprocess `git` through `GitCache`, and authentication falls through
-to the host's local git credential helper. Hosted `marketplace.json`
+Other git hosts are fetched via subprocess `git` through `GitCache`.
+Generic HTTPS can use a local Git credential helper; plain HTTP suppresses
+credentials, HTTPS-to-HTTP Git URL rewrites are rejected, and generic SSH is
+token-free and noninteractive. See the
+[authentication transport table](../../../getting-started/authentication/#generic-marketplace-git-transport)
+for the full policy. Hosted `marketplace.json`
 URLs are public HTTPS only: APM sends no auth headers. Use a
 git-backed marketplace for private catalogs. When packages are
 installed from a hosted JSON URL, the lockfile records the source URL

@@ -49,9 +49,12 @@ from scripts.architecture_linter.models import Rule, Violation
 
 _RID_HOST_CRED = "transport-platform-host-credential-resolution"
 _RID_GIT_CHILD_ENV = "transport-platform-git-child-environment"
+_RID_ARTIFACTORY_NETRC = "transport-platform-artifactory-netrc-isolation"
 
 
 _AUTH_OWNER = "src/apm_cli/core/auth.py"
+_ARTIFACTORY_NETRC_OWNER = "src/apm_cli/deps/artifactory_entry.py"
+_ARTIFACTORY_NETRC_CONSUMER = "src/apm_cli/deps/download_strategies.py"
 
 
 _PUBLIC_GH_CONSUMERS: tuple[str, ...] = (
@@ -246,6 +249,60 @@ def _check_host_credential_resolution(provider: FactsProvider) -> tuple[Violatio
             _NONINTERACTIVE_BYPASS,
             "noninteractive Git env must be built only by AuthResolver / git_auth_env.py",
             exempt=True,
+        )
+    )
+    return tuple(findings)
+
+
+def _check_artifactory_netrc_isolation(provider: FactsProvider) -> tuple[Violation, ...]:
+    inv = frozenset(provider.inventory)
+    findings: list[Violation] = []
+
+    findings.extend(
+        _count_checks(
+            provider,
+            inv,
+            _RID_ARTIFACTORY_NETRC,
+            _ARTIFACTORY_NETRC_OWNER,
+            (
+                ("re", r"^class _NoNetrcSession\(", 1, "eq"),
+                ("sub", "with _NoNetrcSession() as session:", 1, "eq"),
+            ),
+            "artifactory_entry.py must own ambient netrc suppression",
+        )
+    )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_ARTIFACTORY_NETRC,
+            _ARTIFACTORY_NETRC_OWNER,
+            (
+                "self.trust_env = False",
+                "def rebuild_auth(",
+                "self.should_strip_auth(",
+            ),
+            "Artifactory requests must preserve redirects without ambient netrc auth",
+        )
+    )
+    findings.extend(
+        _count_checks(
+            provider,
+            inv,
+            _RID_ARTIFACTORY_NETRC,
+            _ARTIFACTORY_NETRC_CONSUMER,
+            (("sub", "allow_netrc=False", 3, "eq"),),
+            "Every Artifactory resilient GET path must suppress ambient netrc auth",
+        )
+    )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_ARTIFACTORY_NETRC,
+            _ARTIFACTORY_NETRC_CONSUMER,
+            ("from .artifactory_entry import _NoNetrcSession",),
+            "Download strategies must reuse the Artifactory netrc-isolation owner",
         )
     )
     return tuple(findings)
@@ -652,6 +709,13 @@ def _check_windows_stable_path(provider: FactsProvider) -> tuple[Violation, ...]
 
 
 RULES: tuple[Rule, ...] = (
+    Rule(
+        id=_RID_ARTIFACTORY_NETRC,
+        group=GROUP,
+        guard_ids=(_RID_ARTIFACTORY_NETRC,),
+        description="Artifactory HTTP requests exclude ambient netrc credentials.",
+        check=_check_artifactory_netrc_isolation,
+    ),
     Rule(
         id=_RID_HOST_CRED,
         group=GROUP,

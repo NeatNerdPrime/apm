@@ -54,6 +54,24 @@ Results are cached per-process. Validation, persistent Git cache population, and
 |----------|--------|-------|
 | 1 | `git credential fill` | Configure credentials for that host in git |
 
+### Generic marketplace Git transport
+
+Marketplace Git fetches use `AuthResolver` host classification with a
+transport-specific credential policy. Generic HTTPS may use its native Git credential helper, while
+APM remains noninteractive (`GIT_TERMINAL_PROMPT=0`). Platform token variables,
+`GIT_TOKEN`, and environment-based authorization-header channels are removed
+before that fetch.
+
+| Remote | Credential posture |
+| --- | --- |
+| Generic HTTPS | Native Git credential helpers are available. |
+| Generic HTTP | Git fetches isolate configuration and suppress all credential channels. Hosted `marketplace.json` registration requires HTTPS. |
+| Generic SSH | Token-free, with `BatchMode=yes` and `ConnectTimeout=30`. |
+| GitHub, GitLab, ADO | Continue using the hardened provider-specific environment. |
+
+APM rejects an HTTPS Git URL that Git configuration would rewrite to
+`http://` before any credential helper or provider credential is used.
+
 For Azure DevOps Services, APM resolves `ADO_APM_PAT`, then an Entra ID
 (AAD) bearer token from Azure CLI (`az`). Azure DevOps Server uses
 `ADO_APM_PAT` only. See [Azure DevOps](#azure-devops).

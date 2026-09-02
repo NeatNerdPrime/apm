@@ -43,6 +43,8 @@ from typing import TYPE_CHECKING, NamedTuple, TypeVar
 from apm_cli.core.host_providers import (
     HOST_PROVIDERS,
     classify_host_provider,
+    git_transport_cache_key,
+    git_transport_policy,
 )
 from apm_cli.core.token_manager import GitHubTokenManager
 from apm_cli.utils.github_host import (
@@ -229,6 +231,7 @@ class AuthCacheKey(NamedTuple):
     host_type: str  # Empty string represents an absent or canonical host_type.
     org: str
     path: str  # Empty unless credential resolution is repository-scoped.
+    transport: str  # Empty for callers without a concrete remote URL.
 
 
 class AuthResolver:
@@ -284,6 +287,7 @@ class AuthResolver:
         port: int | None = None,
         host_type: str | None = None,
         path: str | None = None,
+        remote_url: str | None = None,
     ) -> bool:
         """Return whether credential resolution already ran for this scope."""
         key = AuthCacheKey(
@@ -292,6 +296,7 @@ class AuthResolver:
             self._cache_host_type(host, host_type),
             org.lower() if org else "",
             path or "",
+            git_transport_cache_key(remote_url),
         )
         with self._lock:
             return key in self._cache
@@ -395,6 +400,7 @@ class AuthResolver:
         port: int | None = None,
         host_type: str | None = None,
         path: str | None = None,
+        remote_url: str | None = None,
     ) -> AuthContext:
         """Resolve auth for a host/org and optional repository path.
 
@@ -410,6 +416,7 @@ class AuthResolver:
             self._cache_host_type(host, host_type),
             org.lower() if org else "",
             path or "",
+            git_transport_cache_key(remote_url),
         )
         with self._lock:
             cached = self._cache.get(key)
@@ -423,13 +430,25 @@ class AuthResolver:
             # Bounded by APM_GIT_CREDENTIAL_TIMEOUT (default 60s). No deadlock
             # risk: single lock, never nested.
             host_info = self.classify_host(host, port=port, host_type=host_type)
+            transport_policy = (
+                git_transport_policy(host_info.kind, remote_url) if remote_url is not None else None
+            )
             if path is None:
-                token, source, scheme = self._resolve_token(host_info, org)
+                token, source, scheme = self._resolve_token(
+                    host_info,
+                    org,
+                    allow_generic_credential_lookup=(
+                        transport_policy is None or transport_policy.allow_native_credential_lookup
+                    ),
+                )
             else:
                 token, source, scheme = self._resolve_token(
                     host_info,
                     org,
                     path=path,
+                    allow_generic_credential_lookup=(
+                        transport_policy is None or transport_policy.allow_native_credential_lookup
+                    ),
                 )
             token_type = self.detect_token_type(token) if token else "unknown"
             git_env = self._build_git_env(token, scheme=scheme, host_kind=host_info.kind)
@@ -444,6 +463,24 @@ class AuthResolver:
             )
             self._cache[key] = ctx
             return ctx
+
+    def resolve_for_remote(
+        self,
+        host: str,
+        remote_url: str,
+        org: str | None = None,
+        *,
+        port: int | None = None,
+        host_type: str | None = None,
+    ) -> AuthContext:
+        """Resolve one context after applying its canonical remote policy."""
+        return self.resolve(
+            host,
+            org,
+            port=port,
+            host_type=host_type,
+            remote_url=remote_url,
+        )
 
     def resolve_for_dep(self, dep_ref: DependencyReference) -> AuthContext:
         """Resolve auth from a ``DependencyReference``.
@@ -1098,6 +1135,7 @@ class AuthResolver:
         org: str | None,
         *,
         path: str | None = None,
+        allow_generic_credential_lookup: bool = True,
     ) -> tuple[str | None, str, str]:
         """Walk the token resolution chain.  Returns (token, source, scheme).
 
@@ -1171,22 +1209,22 @@ class AuthResolver:
             return gh_token, "gh-auth-token", "basic"
 
         # 4. Git credential helper (not for ADO)
-        if host_info.kind not in ("ado",):
+        if host_info.kind not in ("ado",) and (
+            host_info.kind != "generic" or allow_generic_credential_lookup
+        ):
             # Most primary resolution calls remain host-scoped. The public
             # github.com anonymous-first fallback supplies path= after a
             # private-repo-shaped failure so GCM can choose the correct
             # account without an unscoped prompt.
-            if path is None:
-                credential = self._token_manager.resolve_credential_from_git(
-                    host_info.host,
-                    port=host_info.port,
-                )
-            else:
-                credential = self._token_manager.resolve_credential_from_git(
-                    host_info.host,
-                    port=host_info.port,
-                    path=path,
-                )
+            lookup_kwargs: dict[str, object] = {"port": host_info.port}
+            if path is not None:
+                lookup_kwargs["path"] = path
+            if host_info.kind == "generic":
+                lookup_kwargs["env"] = self._generic_credential_lookup_env()
+            credential = self._token_manager.resolve_credential_from_git(
+                host_info.host,
+                **lookup_kwargs,
+            )
             if credential:
                 return credential, "git-credential-fill", "basic"
 
@@ -1369,17 +1407,56 @@ class AuthResolver:
             base_env=self.hardened_git_base_env(),
         )
 
+    def git_env_for_remote(self, ctx: AuthContext, remote_url: str) -> dict[str, str]:
+        """Build the canonical noninteractive Git environment for one remote.
+
+        Host and transport policy belongs to the provider registry. This method
+        only applies that selected policy to the resolved context, keeping
+        marketplace and dependency consumers from branching on transport.
+        """
+        policy = git_transport_policy(ctx.host_info.kind, remote_url)
+        base_env = self.hardened_git_base_env()
+        if policy.use_resolved_credentials:
+            env = self.git_env_for_context(ctx, base_env=base_env)
+        else:
+            env = self.build_noninteractive_git_env(
+                base_env=base_env,
+                host_kind=ctx.host_info.kind,
+                preserve_config_isolation=policy.preserve_config_isolation,
+                suppress_credential_helpers=policy.suppress_credential_helpers,
+            )
+        if policy.reject_https_downgrade:
+            from ..deps.git_auth_env import GitAuthEnvBuilder
+
+            if GitAuthEnvBuilder.has_https_to_http_url_rewrite(remote_url, env):
+                raise ValueError("HTTPS Git remote is configured to rewrite to insecure HTTP")
+        self._clear_platform_token_env(env, remove=True)
+        return env
+
+    def _generic_credential_lookup_env(self) -> dict[str, str]:
+        """Build the token-free native-helper environment for generic hosts."""
+        env = self.build_noninteractive_git_env(
+            base_env=self.hardened_git_base_env(),
+            host_kind="generic",
+        )
+        self._clear_platform_token_env(env, remove=True)
+        return env
+
     @staticmethod
-    def _clear_platform_token_env(env: dict) -> None:
-        """Neutralize raw platform token sources before spawning git.
+    def _clear_platform_token_env(env: dict, *, remove: bool = False) -> None:
+        """Scrub raw platform token sources before spawning git.
 
         GitPython treats ``env`` as an overlay on the parent process, so
         deleting a key from the overlay leaves the ambient value intact.
-        Empty values mask those sources in GitPython and direct subprocesses.
+        The default empty values mask those sources in GitPython and direct
+        subprocesses. Complete subprocess environments may remove them.
         """
         for key in tuple(env):
             if key in _GIT_CHILD_TOKEN_ENV_NAMES or key.startswith(_GIT_CHILD_TOKEN_ENV_PREFIXES):
-                env[key] = ""
+                if remove:
+                    env.pop(key, None)
+                else:
+                    env[key] = ""
 
     @staticmethod
     def _clear_git_auth_env(env: dict) -> None:

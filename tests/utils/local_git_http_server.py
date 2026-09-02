@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import functools
+import ssl
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -94,14 +95,15 @@ class _GitHttpHandler(SimpleHTTPRequestHandler):
 class LocalGitHttpServer:
     """Running loopback server for one or more bare Git repositories."""
 
-    def __init__(self, server: _GitHttpServer, thread: threading.Thread) -> None:
+    def __init__(self, server: _GitHttpServer, thread: threading.Thread, *, scheme: str) -> None:
         self._server = server
         self._thread = thread
+        self._scheme = scheme
 
     @property
     def proxy_url(self) -> str:
-        """Return a loopback URL suitable for HTTPS_PROXY."""
-        return f"http://127.0.0.1:{self._server.server_port}"
+        """Return the loopback URL for this fixture."""
+        return f"{self._scheme}://127.0.0.1:{self._server.server_port}"
 
     @property
     def observations(self) -> tuple[GitHttpObservation, ...]:
@@ -149,8 +151,10 @@ class LocalGitHttpServerFactory:
         password: str,
         private_repositories: tuple[LocalGitRepository, ...] = (),
         username: str = "x-access-token",
+        certfile: Path | None = None,
+        keyfile: Path | None = None,
     ) -> LocalGitHttpServer:
-        """Prepare and serve repositories with optional Basic-auth policy."""
+        """Prepare and serve repositories with optional Basic-auth and TLS policy."""
         if not repositories:
             raise ValueError("At least one repository is required")
         private_names = {repository.origin.name for repository in private_repositories}
@@ -182,10 +186,19 @@ class LocalGitHttpServerFactory:
         server.expected_authorization = f"Basic {credentials}"
         server.observations = []
         server.observations_lock = threading.Lock()
+        scheme = "http"
+        if certfile is not None or keyfile is not None:
+            if certfile is None or keyfile is None:
+                raise ValueError("TLS requires both certfile and keyfile")
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.load_cert_chain(certfile=certfile, keyfile=keyfile)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            scheme = "https"
         thread = threading.Thread(
             target=server.serve_forever,
             name="local-git-http",
             daemon=True,
         )
         thread.start()
-        return LocalGitHttpServer(server, thread)
+        return LocalGitHttpServer(server, thread, scheme=scheme)

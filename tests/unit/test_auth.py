@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 from urllib.parse import urlparse
 
 import pytest
@@ -273,7 +273,7 @@ class TestResolve:
         """Concurrent resolve() calls for the same key should populate cache once."""
         resolver = AuthResolver()
 
-        def _slow_resolve_token(host_info, org):
+        def _slow_resolve_token(host_info, org, **_kwargs):
             time.sleep(0.05)
             return ("cred-token", "git-credential-fill", "basic")
 
@@ -1221,7 +1221,7 @@ class TestResolvePortDiscrimination:
             resolver = AuthResolver()
             calls: list = []
 
-            def fake_cred(host, port=None):
+            def fake_cred(host, port=None, **_kwargs):
                 calls.append((host, port))
                 return f"tok-{host}-{port}"
 
@@ -1282,7 +1282,7 @@ class TestResolvePortDiscrimination:
 
         assert ctx.host_info.port == 7999
         assert ctx.host_info.display_name == "bitbucket.corp.com:7999"
-        mock_cred.assert_called_once_with("bitbucket.corp.com", port=7999)
+        mock_cred.assert_called_once_with("bitbucket.corp.com", port=7999, env=ANY)
 
     def test_resolve_for_dep_threads_port_from_https_url(self):
         """https://host:port/... also carries the port into the resolver."""
@@ -1299,7 +1299,7 @@ class TestResolvePortDiscrimination:
                 ctx = resolver.resolve_for_dep(dep)
 
         assert ctx.host_info.port == 7990
-        mock_cred.assert_called_once_with("bitbucket.corp.com", port=7990)
+        mock_cred.assert_called_once_with("bitbucket.corp.com", port=7990, env=ANY)
 
     def test_host_info_carries_port(self):
         with patch.dict(os.environ, {"GITHUB_APM_PAT": "t"}, clear=True):

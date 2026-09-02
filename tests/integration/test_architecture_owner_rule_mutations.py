@@ -590,6 +590,22 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="MCP warnings stop classifying host literals through utils/net.py.",
     ),
     MutationCase(
+        guard_id="transport-platform-artifactory-full-commit-sha",
+        rule_id="transport-platform-artifactory-full-commit-sha",
+        path="src/apm_cli/utils/github_host.py",
+        old="    if is_full_commit_sha(ref):",
+        new="    if False and is_full_commit_sha(ref):",
+        intent="Artifactory archive routing stops consulting the full commit SHA owner.",
+    ),
+    MutationCase(
+        guard_id="transport-platform-artifactory-netrc-isolation",
+        rule_id="transport-platform-artifactory-netrc-isolation",
+        path="src/apm_cli/deps/artifactory_entry.py",
+        old="                    with _NoNetrcSession() as session:",
+        new="                    with _requests.Session() as session:",
+        intent="Direct Artifactory entry requests regain ambient netrc credentials.",
+    ),
+    MutationCase(
         guard_id="transport-platform-ref-freshness",
         rule_id="transport-platform-ref-freshness",
         path="src/apm_cli/install/helpers/ref_seed.py",

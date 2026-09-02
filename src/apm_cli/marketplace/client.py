@@ -565,23 +565,41 @@ def _fetch_git(
 ) -> dict | None:
     """Fetch marketplace.json from a generic git URL via subprocess + GitCache.
 
-    Sparse-cone clones only the requested manifest path. Uses
-    ``AuthResolver.resolve(host, org).git_env`` to build the git env; for
-    hosts APM doesn't recognise, the env passes through to the user's
-    credential helpers (matches ``apm install`` posture).
+    Sparse-cone clones only the requested manifest path. AuthResolver owns
+    remote-aware credential selection and Git environment policy.
     """
     _validate_ref(source.ref, source.name)
 
-    from ..cache.git_cache import GitCache, _sanitize_url
+    from ..cache.git_cache import GitCache
     from ..cache.paths import get_cache_root
 
     org = source.owner or None
-    auth_ctx = (
-        auth_resolver.resolve(host_info.host, org, port=source.port)
-        if source.port is not None
-        else auth_resolver.resolve(host_info.host, org)
-    )
-    git_env = auth_resolver.hardened_git_env_for_context(auth_ctx)
+    try:
+        auth_ctx = (
+            auth_resolver.resolve_for_remote(host_info.host, source.url, org, port=source.port)
+            if source.port is not None
+            else auth_resolver.resolve_for_remote(host_info.host, source.url, org)
+        )
+        git_env = auth_resolver.git_env_for_remote(auth_ctx, source.url)
+    except ValueError as exc:
+        logger.debug(
+            "Generic-git policy rejected '%s': %s",
+            source.name,
+            type(exc).__name__,
+        )
+        reason = (
+            "HTTPS Git remote was rejected because Git configuration rewrites it to insecure HTTP"
+            if str(exc) == "HTTPS Git remote is configured to rewrite to insecure HTTP"
+            else "unable to verify HTTPS Git rewrite safety"
+        )
+        raise MarketplaceFetchError(
+            source.name,
+            reason,
+            retry_hint=(
+                "Remove the matching Git url.*.insteadOf rewrite, then run "
+                f"'apm marketplace update {source.name}' to retry."
+            ),
+        ) from exc
 
     cache = GitCache(get_cache_root(), refresh=False)
     try:
@@ -600,11 +618,22 @@ def _fetch_git(
         stderr_raw = (getattr(exc, "stderr", b"") or b"").decode("utf-8", errors="replace")
         if "not found" in stderr_raw.lower() or "does not exist" in stderr_raw.lower():
             return None
-        stderr = _sanitize_url(stderr_raw)
-        raise MarketplaceFetchError(source.name, f"git fetch failed: {stderr or exc}") from exc
+        raise MarketplaceFetchError(
+            source.name,
+            "git fetch failed; verify the remote, configured Git credentials, or SSH key",
+            retry_hint=(
+                f"Correct Git access, then run 'apm marketplace update {source.name}' to retry."
+            ),
+        ) from exc
     except Exception as exc:
-        logger.debug("Generic-git fetch failed for '%s'", source.name, exc_info=True)
-        raise MarketplaceFetchError(source.name, _sanitize_url(str(exc))) from exc
+        logger.debug("Generic-git fetch failed for '%s': %s", source.name, type(exc).__name__)
+        raise MarketplaceFetchError(
+            source.name,
+            "git fetch failed; verify the remote, configured Git credentials, or SSH key",
+            retry_hint=(
+                f"Correct Git access, then run 'apm marketplace update {source.name}' to retry."
+            ),
+        ) from exc
 
     target = Path(checkout_dir) / file_path
     if not target.exists():
