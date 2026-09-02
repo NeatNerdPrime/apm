@@ -9,6 +9,7 @@ import pytest
 
 from apm_cli.utils.git_env import (
     _STRIP_GIT_VARS,
+    clone_git_worktree,
     get_git_executable,
     git_subprocess_env,
     git_subprocess_error_text,
@@ -165,3 +166,40 @@ class TestGitSubprocessEnv:
             stderr=b"fatal: missing ref\n",
         )
         assert git_subprocess_error_text(exc) == "fatal: missing ref"
+
+    def test_clone_retains_url_rewrite_without_restoring_parent_auth(self, tmp_path) -> None:
+        parent = {
+            "GITHUB_TOKEN": "ambient-token",
+            "GIT_CONFIG_GLOBAL": "/fixture/gitconfig",
+            "GIT_HTTP_EXTRAHEADER": "Authorization: Basic stale",
+            "GIT_CONFIG_PARAMETERS": "'http.extraheader=Authorization: Basic stale'",
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "http.extraheader",
+            "GIT_CONFIG_VALUE_0": "Authorization: Basic stale",
+            "GIT_CONFIG_KEY_1": "url.file:///fixture/.insteadOf",
+            "GIT_CONFIG_VALUE_1": "https://git.example.com/acme/repo",
+        }
+        resolved = {
+            "PATH": "/usr/bin",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "",
+        }
+        with (
+            patch.dict(os.environ, parent, clear=True),
+            patch("apm_cli.utils.git_env.subprocess.run") as run,
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=resolved,
+            )
+
+        child = run.call_args.kwargs["env"]
+        assert "GITHUB_TOKEN" not in child
+        assert "GIT_HTTP_EXTRAHEADER" not in child
+        assert "GIT_CONFIG_PARAMETERS" not in child
+        assert child["GIT_CONFIG_GLOBAL"] == "/fixture/gitconfig"
+        assert child["GIT_CONFIG_COUNT"] == "2"
+        assert child["GIT_CONFIG_KEY_1"] == "url.file:///fixture/.insteadOf"
+        assert child["GIT_CONFIG_VALUE_1"] == "https://git.example.com/acme/repo"

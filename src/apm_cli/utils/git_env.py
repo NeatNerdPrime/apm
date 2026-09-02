@@ -118,6 +118,40 @@ def git_subprocess_error_text(exc: BaseException) -> str:
     return str(exc)
 
 
+def _append_parent_safe_git_config(env: dict[str, str]) -> None:
+    """Retain parent config selection and URL rewrites, never auth channels."""
+    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        if name not in env and name in os.environ:
+            env[name] = os.environ[name]
+    try:
+        parent_count = max(0, int(os.environ.get("GIT_CONFIG_COUNT", "0") or "0"))
+        target_count = max(0, int(env.get("GIT_CONFIG_COUNT", "0") or "0"))
+    except ValueError:
+        return
+
+    existing = {
+        (env.get(f"GIT_CONFIG_KEY_{index}", ""), env.get(f"GIT_CONFIG_VALUE_{index}", ""))
+        for index in range(target_count)
+    }
+    for index in range(parent_count):
+        key = os.environ.get(f"GIT_CONFIG_KEY_{index}", "")
+        value = os.environ.get(f"GIT_CONFIG_VALUE_{index}", "")
+        normalized = key.lower()
+        if not (
+            normalized.startswith("url.")
+            and normalized.endswith(".insteadof")
+            and value
+            and (key, value) not in existing
+        ):
+            continue
+        env[f"GIT_CONFIG_KEY_{target_count}"] = key
+        env[f"GIT_CONFIG_VALUE_{target_count}"] = value
+        target_count += 1
+        existing.add((key, value))
+    if target_count:
+        env["GIT_CONFIG_COUNT"] = str(target_count)
+
+
 def clone_git_worktree(
     url: str,
     target: Path,
@@ -138,16 +172,16 @@ def clone_git_worktree(
         args.append("--no-checkout")
     args.extend(extra_options)
     args.extend(("--", url, str(target)))
-    complete_env: dict[str, object] = dict(os.environ)
+    clone_env = git_subprocess_env(env)
     if env is not None:
-        complete_env.update(env)
+        _append_parent_safe_git_config(clone_env)
     subprocess.run(
         args,
         check=True,
         capture_output=True,
         text=True,
         timeout=300,
-        env=git_subprocess_env(complete_env),
+        env=clone_env,
     )
 
 
