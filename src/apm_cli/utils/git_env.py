@@ -138,13 +138,16 @@ def clone_git_worktree(
         args.append("--no-checkout")
     args.extend(extra_options)
     args.extend(("--", url, str(target)))
+    complete_env: dict[str, object] = dict(os.environ)
+    if env is not None:
+        complete_env.update(env)
     subprocess.run(
         args,
         check=True,
         capture_output=True,
         text=True,
         timeout=300,
-        env=git_subprocess_env(env),
+        env=git_subprocess_env(complete_env),
     )
 
 

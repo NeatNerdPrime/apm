@@ -899,7 +899,12 @@ def build_clone_failure_message(
     if last_error:
         from ..utils.git_env import git_subprocess_error_text
 
-        sanitized_error = sanitize_git_error(git_subprocess_error_text(last_error))
+        detail = (
+            str(last_error)
+            if (last_attempt_scheme or "").lower() == "ssh"
+            else git_subprocess_error_text(last_error)
+        )
+        sanitized_error = sanitize_git_error(detail)
         error_msg += f" Last error: {sanitized_error}"
 
     return error_msg
