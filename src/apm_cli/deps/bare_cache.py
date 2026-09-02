@@ -718,7 +718,7 @@ def clone_with_fallback(
             _rmtree(target)
         if repo_cls is not None and repo_cls is not Repo:
             repo_holder.append(
-                getattr(_repo, "clone_from")(
+                getattr(_repo, "clone_from")(  # noqa: B009 - injected test double only
                     url,
                     target,
                     env=git_subprocess_env(env),
