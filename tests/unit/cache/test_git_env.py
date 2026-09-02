@@ -180,7 +180,7 @@ class TestGitSubprocessEnv:
             "GIT_CONFIG_VALUE_1": "https://git.example.com/acme/repo",
         }
         resolved = {
-            "PATH": "/usr/bin",
+            "PATH": os.environ["PATH"],
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "credential.helper",
             "GIT_CONFIG_VALUE_0": "",
