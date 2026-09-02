@@ -187,6 +187,7 @@ class TestGitSubprocessEnv:
         }
         with (
             patch.dict(os.environ, parent, clear=True),
+            patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
             patch("apm_cli.utils.git_env.subprocess.run") as run,
         ):
             clone_git_worktree(
