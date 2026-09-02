@@ -156,12 +156,20 @@ class GitConfigInsteadOfResolver:
         Returns an empty list if git is missing, exits non-zero, or no
         rewrites are configured.
         """
+        from ..utils.git_env import get_git_executable, git_subprocess_env
+
         try:
             result = subprocess.run(
-                ["git", "config", "--get-regexp", r"^url\..*\.insteadof$"],
+                [
+                    get_git_executable(),
+                    "config",
+                    "--get-regexp",
+                    r"^url\..*\.insteadof$",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=5,
+                env=git_subprocess_env(),
             )
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
             return []

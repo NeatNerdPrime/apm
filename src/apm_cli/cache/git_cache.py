@@ -236,7 +236,7 @@ class GitCache:
         from ..utils.git_env import get_git_executable, git_subprocess_env
 
         git_exe = get_git_executable()
-        subprocess_env = env if env is not None else git_subprocess_env()
+        subprocess_env = git_subprocess_env(env)
         dangling = repair_dangling_cone_symlinks(
             git_exe,
             checkout_dir,
@@ -307,7 +307,7 @@ class GitCache:
         if ref:
             cmd.append(ref)
 
-        subprocess_env = env if env is not None else git_subprocess_env()
+        subprocess_env = git_subprocess_env(env)
         try:
             result = subprocess.run(
                 cmd,
@@ -406,7 +406,7 @@ class GitCache:
             staged.mkdir(parents=True, exist_ok=True)
             os.chmod(str(staged), 0o700)
 
-            subprocess_env = env if env is not None else git_subprocess_env()
+            subprocess_env = git_subprocess_env(env)
             clone_args = [
                 git_exe,
                 *_safe_git_args(),
@@ -599,7 +599,7 @@ class GitCache:
             os.chmod(str(staged), 0o700)
 
             git_exe = get_git_executable()
-            subprocess_env = env if env is not None else git_subprocess_env()
+            subprocess_env = git_subprocess_env(env)
 
             try:
                 # Clone from local bare repo (fast, no network).
@@ -727,10 +727,10 @@ class GitCache:
         from ..utils.git_env import get_git_executable, git_subprocess_env
 
         git_exe = get_git_executable()
-        subprocess_env = env if env is not None else git_subprocess_env()
+        subprocess_env = git_subprocess_env(env)
         try:
             result = subprocess.run(
-                [git_exe, *_safe_git_args(), "-C", str(bare_dir), "cat-file", "-t", sha],
+                [git_exe, *_safe_git_args(), "--git-dir", str(bare_dir), "cat-file", "-t", sha],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -767,12 +767,12 @@ class GitCache:
         from ..utils.git_env import get_git_executable, git_subprocess_env
 
         git_exe = get_git_executable()
-        subprocess_env = env if env is not None else git_subprocess_env()
+        subprocess_env = git_subprocess_env(env)
         # If this is a partial-flavor bare, preserve the filter on fetch
         # so we don't pull all blobs reachable from the new SHA. Detected
         # via shard-suffix naming convention (cheap, no git config probe).
         is_partial = bare_dir.name.endswith(_PARTIAL_BARE_SUFFIX)
-        fetch_args = [git_exe, *_safe_git_args(), "-C", str(bare_dir), "fetch"]
+        fetch_args = [git_exe, *_safe_git_args(), "--git-dir", str(bare_dir), "fetch"]
         if is_partial:
             fetch_args += ["--filter=blob:none"]
         fetch_args += [url, sha]
@@ -788,7 +788,7 @@ class GitCache:
         except subprocess.CalledProcessError:
             # Some servers don't allow fetching by SHA -- fetch all refs
             subprocess.run(
-                [git_exe, *_safe_git_args(), "-C", str(bare_dir), "fetch", "--all"],
+                [git_exe, *_safe_git_args(), "--git-dir", str(bare_dir), "fetch", "--all"],
                 capture_output=True,
                 text=True,
                 timeout=120,

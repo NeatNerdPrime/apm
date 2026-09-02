@@ -202,14 +202,18 @@ class TestLsRemoteResolve:
                 "subprocess.run", return_value=_proc(stdout=f"{sha}\trefs/heads/main\n")
             ) as mock_run,
             patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
-            patch("apm_cli.utils.git_env.git_subprocess_env", return_value={"DEFAULT": "1"}),
+            patch(
+                "apm_cli.utils.git_env.git_subprocess_env",
+                return_value={"DEFAULT": "1"},
+            ) as sanitize,
         ):
             result = cache._ls_remote_resolve(
                 "https://example.com/repo.git", "main", env=explicit_env
             )
 
         assert result == sha
-        assert mock_run.call_args.kwargs["env"] is explicit_env
+        sanitize.assert_called_once_with(explicit_env)
+        assert mock_run.call_args.kwargs["env"] == {"DEFAULT": "1"}
 
     def test_uses_default_git_env_when_env_not_provided(self, cache: GitCache) -> None:
         sha = "3" * 40
@@ -675,7 +679,7 @@ class TestFetchIntoBareLocked:
         assert mock_run.call_args_list[0].args[0] == [
             "git",
             *_safe_git_args(),
-            "-C",
+            "--git-dir",
             str(bare_dir),
             "fetch",
             "https://example.com/repo.git",
@@ -701,7 +705,7 @@ class TestFetchIntoBareLocked:
         assert mock_run.call_args_list[1].args[0] == [
             "git",
             *_safe_git_args(),
-            "-C",
+            "--git-dir",
             str(bare_dir),
             "fetch",
             "--all",

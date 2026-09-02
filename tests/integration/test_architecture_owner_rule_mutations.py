@@ -6,8 +6,8 @@ runner already proves the registry and the rule catalog agree *by name* and that
 every guard executes exactly once per run.  Names prove nothing about teeth: a
 rule whose body was gutted still registers its guard ID and still runs.
 
-This file supplies the missing half of that contract.  For each of the 58
-registered owner guards it pins one minimal, meaningful source mutation -- a
+This file supplies the missing half of that contract. For each registered owner
+guard it pins one minimal, meaningful source mutation -- a
 surgical edit that kills a load-bearing sub-condition of the owning decision --
 and asserts the one rule that owns that guard reports a real `Violation`.
 Coverage is a set equality against the live registry, so a new owner guard that
@@ -572,6 +572,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
             "def _debug(message: str) -> None:"
         ),
         intent="A downloader reads an ADO token off the host instead of via AuthResolver.",
+    ),
+    MutationCase(
+        guard_id="transport-platform-git-child-environment",
+        rule_id="transport-platform-git-child-environment",
+        path="src/apm_cli/deps/git_auth_env.py",
+        old="env = git_subprocess_env(self._token_manager.setup_environment())",
+        new="env = self._token_manager.setup_environment()",
+        intent="The primary Git environment stops stripping ambient repository state.",
     ),
     MutationCase(
         guard_id="transport-platform-network-host-parsing",

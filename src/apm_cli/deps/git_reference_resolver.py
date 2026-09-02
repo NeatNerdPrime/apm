@@ -25,6 +25,7 @@ pattern.
 from __future__ import annotations
 
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -513,12 +514,13 @@ class GitReferenceResolver:
 
             if is_likely_commit:
                 try:
-                    repo = host._clone_with_fallback(
+                    host._clone_with_fallback(
                         dep_ref.repo_url, temp_dir, progress_reporter=None, dep_ref=dep_ref
                     )
-                    commit = repo.commit(ref)
+                    from ..utils.git_env import git_resolve_commit
+
                     ref_type = GitReferenceType.COMMIT
-                    resolved_commit = commit.hexsha
+                    resolved_commit = git_resolve_commit(temp_dir, ref, env=host.git_env)
                     ref_name = ref
                 except Exception as e:
                     sanitized_error = host._sanitize_git_error(str(e))
@@ -531,36 +533,46 @@ class GitReferenceResolver:
                     clone_kwargs = {"depth": 1}
                     if ref:
                         clone_kwargs["branch"] = ref
-                    repo = host._clone_with_fallback(
+                    host._clone_with_fallback(
                         dep_ref.repo_url,
                         temp_dir,
                         progress_reporter=None,
                         dep_ref=dep_ref,
                         **clone_kwargs,
                     )
+                    from ..utils.git_env import git_current_branch, git_worktree_head
+
                     ref_type = GitReferenceType.BRANCH
-                    resolved_commit = repo.head.commit.hexsha
-                    ref_name = ref if ref else repo.active_branch.name
+                    resolved_commit = git_worktree_head(temp_dir, env=host.git_env)
+                    ref_name = ref if ref else git_current_branch(temp_dir, env=host.git_env)
 
                 except GitCommandError:
                     try:
-                        repo = host._clone_with_fallback(
+                        host._clone_with_fallback(
                             dep_ref.repo_url, temp_dir, progress_reporter=None, dep_ref=dep_ref
                         )
 
                         try:
+                            from ..utils.git_env import git_resolve_commit
+
                             try:
-                                branch = repo.refs[f"origin/{ref}"]
                                 ref_type = GitReferenceType.BRANCH
-                                resolved_commit = branch.commit.hexsha
+                                resolved_commit = git_resolve_commit(
+                                    temp_dir,
+                                    f"refs/remotes/origin/{ref}",
+                                    env=host.git_env,
+                                )
                                 ref_name = ref
-                            except IndexError:
+                            except subprocess.CalledProcessError:
                                 try:
-                                    tag = repo.tags[ref]
                                     ref_type = GitReferenceType.TAG
-                                    resolved_commit = tag.commit.hexsha
+                                    resolved_commit = git_resolve_commit(
+                                        temp_dir,
+                                        f"refs/tags/{ref}",
+                                        env=host.git_env,
+                                    )
                                     ref_name = ref
-                                except IndexError:
+                                except subprocess.CalledProcessError:
                                     raise ValueError(  # noqa: B904
                                         f"Reference '{ref}' not found in repository "
                                         f"{dep_ref.repo_url}"

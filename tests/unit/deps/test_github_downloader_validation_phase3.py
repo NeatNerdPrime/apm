@@ -28,6 +28,7 @@ Covers branches not hit by the existing test_github_downloader_validation.py:
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -529,23 +530,23 @@ class TestPathExistsInTreeAtRef:
         return AttemptSpec("ssh", "git@github.com:owner/repo.git", {})
 
     def test_fetch_failure_returns_false(self, tmp_path: Path) -> None:
-        import git as git_mod
-
         dl = _make_downloader()
         dep = _make_github_dep()
         attempt = self._winning_attempt()
-
-        mock_git = MagicMock()
-        mock_git.fetch.side_effect = git_mod.exc.GitCommandError("fetch", 128, "err")
 
         with (
             patch(
                 "apm_cli.deps.github_downloader_validation.get_apm_temp_dir", return_value=tmp_path
             ),
-            patch("apm_cli.deps.github_downloader_validation.git") as mock_git_mod,
+            patch(
+                "apm_cli.deps.github_downloader_validation.subprocess.run",
+                side_effect=[
+                    MagicMock(),
+                    MagicMock(),
+                    subprocess.CalledProcessError(128, ["git", "fetch"]),
+                ],
+            ),
         ):
-            mock_git_mod.cmd.Git.return_value = mock_git
-            mock_git_mod.exc.GitCommandError = git_mod.exc.GitCommandError
             result = _path_exists_in_tree_at_ref(dl, dep, "skills/foo", "main", self._log, attempt)
 
         assert result is False
@@ -555,17 +556,15 @@ class TestPathExistsInTreeAtRef:
         dep = _make_github_dep()
         attempt = self._winning_attempt()
 
-        mock_git = MagicMock()
-        mock_git.fetch.return_value = ""
-        mock_git.ls_tree.return_value = ""  # empty = path not found
-
         with (
             patch(
                 "apm_cli.deps.github_downloader_validation.get_apm_temp_dir", return_value=tmp_path
             ),
-            patch("apm_cli.deps.github_downloader_validation.git") as mock_git_mod,
+            patch(
+                "apm_cli.deps.github_downloader_validation.subprocess.run",
+                return_value=MagicMock(stdout=""),
+            ),
         ):
-            mock_git_mod.cmd.Git.return_value = mock_git
             result = _path_exists_in_tree_at_ref(dl, dep, "skills/foo", "main", self._log, attempt)
 
         assert result is False
@@ -575,40 +574,38 @@ class TestPathExistsInTreeAtRef:
         dep = _make_github_dep()
         attempt = self._winning_attempt()
 
-        mock_git = MagicMock()
-        mock_git.fetch.return_value = ""
-        mock_git.ls_tree.return_value = "040000 tree abc123\tskills/foo\n"
-
         with (
             patch(
                 "apm_cli.deps.github_downloader_validation.get_apm_temp_dir", return_value=tmp_path
             ),
-            patch("apm_cli.deps.github_downloader_validation.git") as mock_git_mod,
+            patch(
+                "apm_cli.deps.github_downloader_validation.subprocess.run",
+                return_value=MagicMock(stdout="040000 tree abc123\tskills/foo\n"),
+            ),
         ):
-            mock_git_mod.cmd.Git.return_value = mock_git
             result = _path_exists_in_tree_at_ref(dl, dep, "skills/foo", "main", self._log, attempt)
 
         assert result is True
 
     def test_ls_tree_exception_returns_false(self, tmp_path: Path) -> None:
-        import git as git_mod
-
         dl = _make_downloader()
         dep = _make_github_dep()
         attempt = self._winning_attempt()
-
-        mock_git = MagicMock()
-        mock_git.fetch.return_value = ""
-        mock_git.ls_tree.side_effect = git_mod.exc.GitCommandError("ls-tree", 128, "err")
 
         with (
             patch(
                 "apm_cli.deps.github_downloader_validation.get_apm_temp_dir", return_value=tmp_path
             ),
-            patch("apm_cli.deps.github_downloader_validation.git") as mock_git_mod,
+            patch(
+                "apm_cli.deps.github_downloader_validation.subprocess.run",
+                side_effect=[
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    subprocess.CalledProcessError(128, ["git", "ls-tree"]),
+                ],
+            ),
         ):
-            mock_git_mod.cmd.Git.return_value = mock_git
-            mock_git_mod.exc.GitCommandError = git_mod.exc.GitCommandError
             result = _path_exists_in_tree_at_ref(dl, dep, "skills/foo", "main", self._log, attempt)
 
         assert result is False

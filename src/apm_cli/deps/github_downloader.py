@@ -33,6 +33,7 @@ from ..utils.atomic_io import atomic_write_text
 from ..utils.console import (
     _rich_warning,  # noqa: F401  -- re-exported; tests patch github_downloader._rich_warning
 )
+from ..utils.git_env import checkout_git_worktree, git_worktree_head
 from ..utils.git_sparse import (
     apply_sparse_cone,
     repair_dangling_cone_symlinks,
@@ -1639,14 +1640,10 @@ class GitHubPackageDownloader:
                         raise RuntimeError(f"Failed to clone repository: {e}") from e
 
                     if is_commit_sha:
-                        repo_obj = None
                         try:
-                            repo_obj = Repo(temp_clone_path)
-                            repo_obj.git.checkout(ref)
+                            checkout_git_worktree(temp_clone_path, ref, env=self.git_env)
                         except Exception as e:
                             raise RuntimeError(f"Failed to checkout commit {ref}: {e}") from e
-                        finally:
-                            _close_repo(repo_obj)
 
                     # Disable progress reporter after clone
                     if progress_reporter:
@@ -1703,14 +1700,10 @@ class GitHubPackageDownloader:
             if _ws2_resolved_commit is not None:
                 resolved_commit = _ws2_resolved_commit
             else:
-                repo = None
                 try:
-                    repo = Repo(temp_clone_path)
-                    resolved_commit = repo.head.commit.hexsha
+                    resolved_commit = git_worktree_head(temp_clone_path, env=self.git_env)
                 except Exception:
                     resolved_commit = "unknown"
-                finally:
-                    _close_repo(repo)
 
             # Update progress - validating
             if progress_obj and progress_task_id is not None:
@@ -1992,14 +1985,14 @@ class GitHubPackageDownloader:
                     if progress_task_id and progress_obj
                     else None
                 )
-                repo = self._clone_with_fallback(
+                self._clone_with_fallback(
                     dep_ref.repo_url,
                     target_path,
                     progress_reporter=progress_reporter,
                     dep_ref=dep_ref,
                     verbose_callback=verbose_callback,
                 )
-                repo.git.checkout(resolved_ref.resolved_commit)
+                checkout_git_worktree(target_path, resolved_ref.resolved_commit, env=self.git_env)
             else:
                 # For branches and tags, we can use shallow clone
                 progress_reporter = (
@@ -2007,7 +2000,7 @@ class GitHubPackageDownloader:
                     if progress_task_id and progress_obj
                     else None
                 )
-                repo = self._clone_with_fallback(
+                self._clone_with_fallback(
                     dep_ref.repo_url,
                     target_path,
                     progress_reporter=progress_reporter,

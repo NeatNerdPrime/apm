@@ -1342,10 +1342,10 @@ class TestDownloadPackage:
             patch("apm_cli.deps.github_downloader._rmtree"),
             patch("apm_cli.deps.package_validator.stamp_plugin_version"),
             patch("apm_cli.deps._shared._validate_and_load_package", return_value=pkg),
+            patch("apm_cli.utils.git_env.checkout_git_worktree") as checkout,
         ):
             downloader.download_package(dep, tmp_path / "pkg")
-        # For commit type, checkout of the specific SHA must be called
-        repo_mock.git.checkout.assert_called_once_with(sha)
+        checkout.assert_called_once_with(tmp_path / "pkg", sha, env=downloader.git_env)
 
     def test_virtual_artifactory_subdir_routes_to_artifactory(
         self, downloader: GitHubPackageDownloader, tmp_path: Path

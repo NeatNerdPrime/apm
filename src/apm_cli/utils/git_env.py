@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+from pathlib import Path
 
 from apm_cli.utils.subprocess_env import external_process_env
 
@@ -98,6 +100,82 @@ def git_subprocess_env(overrides: dict[str, object] | None = None) -> dict[str, 
         for key, value in external_process_env(base).items()
         if key not in _STRIP_GIT_VARS
     }
+
+
+def checkout_git_worktree(
+    worktree: Path,
+    ref: str,
+    *,
+    env: dict[str, object] | None = None,
+) -> None:
+    """Check out a ref in an explicitly located worktree."""
+    subprocess.run(
+        [
+            get_git_executable(),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            str(worktree),
+            "checkout",
+            ref,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=git_subprocess_env(env),
+    )
+
+
+def git_worktree_head(
+    worktree: Path,
+    *,
+    env: dict[str, object] | None = None,
+) -> str:
+    """Return the HEAD commit for an explicitly located worktree."""
+    return git_resolve_commit(worktree, "HEAD", env=env)
+
+
+def git_resolve_commit(
+    worktree: Path,
+    ref: str,
+    *,
+    env: dict[str, object] | None = None,
+) -> str:
+    """Resolve a ref to a commit in an explicitly located worktree."""
+    result = subprocess.run(
+        [
+            get_git_executable(),
+            "-C",
+            str(worktree),
+            "rev-parse",
+            "--verify",
+            f"{ref}^{{commit}}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=git_subprocess_env(env),
+    )
+    return result.stdout.strip()
+
+
+def git_current_branch(
+    worktree: Path,
+    *,
+    env: dict[str, object] | None = None,
+) -> str:
+    """Return the current branch name for an explicitly located worktree."""
+    result = subprocess.run(
+        [get_git_executable(), "-C", str(worktree), "symbolic-ref", "--short", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=git_subprocess_env(env),
+    )
+    return result.stdout.strip()
 
 
 def reset_git_cache() -> None:

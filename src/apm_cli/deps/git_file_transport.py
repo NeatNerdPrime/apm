@@ -214,11 +214,13 @@ class GitSparseFileTransport:
 
     def _run(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
         """Run one git command and raise a sanitized error on failure."""
+        from ..utils.git_env import git_subprocess_env
+
         try:
             result = subprocess.run(
                 cmd,
                 cwd=str(self._work_dir),
-                env=self._git_env,
+                env=git_subprocess_env(self._git_env),
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,

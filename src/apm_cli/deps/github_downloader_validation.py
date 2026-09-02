@@ -34,6 +34,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import re
+import subprocess
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -652,20 +653,41 @@ def _path_exists_in_tree_at_ref(
     try:
         bare = tmpdir / "probe.git"
         bare.mkdir()
-        g = git.cmd.Git(str(bare))
+        from ..utils.git_env import get_git_executable, git_subprocess_env
+
+        git_exe = get_git_executable()
+        probe_env = git_subprocess_env(env)
         try:
-            g.init("--bare")
-            g.remote("add", "origin", url)
+            subprocess.run(
+                [git_exe, "init", "--bare", str(bare)],
+                check=True,
+                capture_output=True,
+                env=probe_env,
+            )
+            subprocess.run(
+                [git_exe, "--git-dir", str(bare), "remote", "add", "origin", url],
+                check=True,
+                capture_output=True,
+                env=probe_env,
+            )
             # --filter=tree:0 keeps the fetch payload tiny: we get the
             # commit + a single tree object, no blob contents.
-            g.fetch(
-                "--depth=1",
-                "--filter=tree:0",
-                "origin",
-                ref,
-                env=env,
+            subprocess.run(
+                [
+                    git_exe,
+                    "--git-dir",
+                    str(bare),
+                    "fetch",
+                    "--depth=1",
+                    "--filter=tree:0",
+                    "origin",
+                    ref,
+                ],
+                check=True,
+                capture_output=True,
+                env=probe_env,
             )
-        except (GitCommandError, OSError) as exc:
+        except (subprocess.CalledProcessError, OSError) as exc:
             log(
                 f"  [x] shallow fetch failed via {label}: "
                 f"{downloader._sanitize_git_error(str(exc))}"
@@ -673,8 +695,15 @@ def _path_exists_in_tree_at_ref(
             return False
 
         try:
-            output = g.ls_tree("FETCH_HEAD", vpath, env=env)
-        except (GitCommandError, OSError) as exc:
+            result = subprocess.run(
+                [git_exe, "--git-dir", str(bare), "ls-tree", "FETCH_HEAD", vpath],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=probe_env,
+            )
+            output = result.stdout
+        except (subprocess.CalledProcessError, OSError) as exc:
             log(f"  [x] ls-tree failed via {label}: {downloader._sanitize_git_error(str(exc))}")
             return False
 

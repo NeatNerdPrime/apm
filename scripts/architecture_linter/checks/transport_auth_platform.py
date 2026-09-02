@@ -48,6 +48,7 @@ from scripts.architecture_linter.groups.common import EXEMPT_MARKER, checked_fac
 from scripts.architecture_linter.models import Rule, Violation
 
 _RID_HOST_CRED = "transport-platform-host-credential-resolution"
+_RID_GIT_CHILD_ENV = "transport-platform-git-child-environment"
 
 
 _AUTH_OWNER = "src/apm_cli/core/auth.py"
@@ -245,6 +246,121 @@ def _check_host_credential_resolution(provider: FactsProvider) -> tuple[Violatio
             _NONINTERACTIVE_BYPASS,
             "noninteractive Git env must be built only by AuthResolver / git_auth_env.py",
             exempt=True,
+        )
+    )
+    return tuple(findings)
+
+
+def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ...]:
+    inv = frozenset(provider.inventory)
+    findings: list[Violation] = []
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            "src/apm_cli/utils/git_env.py",
+            (
+                '"GIT_DIR"',
+                '"GIT_WORK_TREE"',
+                '"GIT_OBJECT_DIRECTORY"',
+                "env=git_subprocess_env(env)",
+            ),
+            "utils/git_env.py must own ambient repository-state isolation",
+        )
+    )
+    for path, needles in (
+        (
+            "src/apm_cli/deps/git_auth_env.py",
+            (
+                "git_subprocess_env(self._token_manager.setup_environment())",
+                "env = git_subprocess_env(base_git_env)",
+            ),
+        ),
+        (
+            "src/apm_cli/cache/git_cache.py",
+            (
+                "subprocess_env = git_subprocess_env(env)",
+                '"--git-dir", str(bare_dir)',
+            ),
+        ),
+        (
+            "src/apm_cli/deps/github_downloader.py",
+            ("checkout_git_worktree(",),
+        ),
+        (
+            "src/apm_cli/deps/bare_cache.py",
+            ("env = git_subprocess_env(env)",),
+        ),
+        (
+            "src/apm_cli/deps/github_downloader_validation.py",
+            ("probe_env = git_subprocess_env(env)",),
+        ),
+        (
+            "src/apm_cli/deps/git_file_transport.py",
+            ("env=git_subprocess_env(self._git_env)",),
+        ),
+        (
+            "src/apm_cli/deps/git_reference_resolver.py",
+            ("git_resolve_commit(", "git_worktree_head("),
+        ),
+        (
+            "src/apm_cli/deps/transport_selection.py",
+            ("env=git_subprocess_env()",),
+        ),
+    ):
+        findings.extend(
+            _require_subs(
+                provider,
+                inv,
+                _RID_GIT_CHILD_ENV,
+                path,
+                needles,
+                "Git repository operations must route through utils/git_env.py",
+            )
+        )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            _paths_under(provider, "src/apm_cli/deps/", (".py",)),
+            re.compile(r"\.git\.checkout\("),
+            "GitPython checkout inherits ambient repository state; use checkout_git_worktree",
+            exempt=False,
+        )
+    )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            _paths_under(provider, "src/apm_cli/deps/", (".py",)),
+            re.compile(r"\brepo\.(commit|head|active_branch|refs|tags)\b"),
+            "GitPython repository reads inherit ambient state; use utils/git_env",
+            exempt=False,
+        )
+    )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            _paths_under(provider, "src/apm_cli/deps/", (".py",)),
+            re.compile(r"git\.cmd\.Git\(str\("),
+            "Path-scoped GitPython commands inherit ambient repository state",
+            exempt=False,
+        )
+    )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            ("src/apm_cli/cache/git_cache.py",),
+            re.compile(r"env if env is not None else git_subprocess_env\(\)"),
+            "Git cache must sanitize explicit environments as well as ambient ones",
+            exempt=False,
         )
     )
     return tuple(findings)
@@ -542,6 +658,13 @@ RULES: tuple[Rule, ...] = (
         guard_ids=(_RID_HOST_CRED,),
         description="Host + credential resolution stays owned by core/auth.py (AuthResolver).",
         check=_check_host_credential_resolution,
+    ),
+    Rule(
+        id=_RID_GIT_CHILD_ENV,
+        group=GROUP,
+        guard_ids=(_RID_GIT_CHILD_ENV,),
+        description="Git child processes cannot inherit repository-locating state.",
+        check=_check_git_child_environment,
     ),
     Rule(
         id=_RID_URL_PATH,

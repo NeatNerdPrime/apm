@@ -164,11 +164,12 @@ def bare_clone_with_fallback(
     the cache boundary. See design.md sec 12 (Bare integrity
     verification).
     """
-    from ..utils.git_env import get_git_executable
+    from ..utils.git_env import get_git_executable, git_subprocess_env
 
     git_exe = get_git_executable()
 
     def _bare_action(url: str, env: dict[str, str], target: Path) -> None:
+        env = git_subprocess_env(env)
         # Pre-attempt cleanup: any prior tier-1 partial state must be
         # wiped before re-attempting (e.g. on ADO bearer retry the
         # template re-invokes _bare_action with a fresh URL/env, and
@@ -347,9 +348,10 @@ def fetch_sha_into_bare(
     Returns:
         ``True`` if the SHA is now present in the bare, ``False`` otherwise.
     """
-    from ..utils.git_env import get_git_executable
+    from ..utils.git_env import get_git_executable, git_subprocess_env
 
     git_exe = get_git_executable()
+    local_env = git_subprocess_env()
 
     def _rev_parse_present() -> bool:
         """Return True if sha is already reachable in the bare."""
@@ -364,6 +366,7 @@ def fetch_sha_into_bare(
                     "--verify",
                     f"{sha}^{{commit}}",
                 ],
+                env=local_env,
                 capture_output=True,
                 timeout=10,
             )
@@ -398,6 +401,7 @@ def fetch_sha_into_bare(
             # no env= needed -- purely local git plumbing, no network access
             result = subprocess.run(
                 [git_exe, "--git-dir", str(bare_path), "update-ref", ref_name, sha],
+                env=local_env,
                 capture_output=True,
                 timeout=10,
             )
@@ -453,7 +457,7 @@ def fetch_sha_into_bare(
         def _fetch_action_sha(url: str, env: dict[str, str], target: Path) -> None:
             subprocess.run(
                 [git_exe, "--git-dir", str(target), "fetch", "--depth=1", url, sha],
-                env=env,
+                env=git_subprocess_env(env),
                 check=True,
                 capture_output=True,
                 timeout=300,
@@ -496,7 +500,7 @@ def fetch_sha_into_bare(
     def _fetch_action_broad(url: str, env: dict[str, str], target: Path) -> None:
         subprocess.run(
             [git_exe, "--git-dir", str(target), "fetch", f"--depth={broad_depth}", url],
-            env=env,
+            env=git_subprocess_env(env),
             check=True,
             capture_output=True,
             timeout=300,
@@ -589,9 +593,10 @@ def materialize_from_bare(
         The resolved commit SHA. Caller threads this into
         ``resolved_commit`` for the lockfile.
     """
-    from ..utils.git_env import get_git_executable
+    from ..utils.git_env import get_git_executable, git_subprocess_env
 
     git_exe = get_git_executable()
+    env = git_subprocess_env(env)
 
     if known_sha:
         resolved_sha = known_sha
@@ -708,6 +713,8 @@ def clone_with_fallback(
     _repo = repo_cls if repo_cls is not None else Repo
 
     def _wt_action(url: str, env: dict[str, str], target: Path) -> None:
+        from ..utils.git_env import git_subprocess_env
+
         # Pre-attempt cleanup: GitPython's Repo.clone_from refuses a
         # non-empty target. Symmetric with _bare_action so retries
         # always start from a clean slate. Behavior change from the
@@ -718,7 +725,7 @@ def clone_with_fallback(
             _repo.clone_from(
                 url,
                 target,
-                env=env,
+                env=git_subprocess_env(env),
                 progress=progress_reporter,
                 **clone_kwargs,
             )

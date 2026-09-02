@@ -93,7 +93,14 @@ class TestGitHubPackageDownloader:
         mock_repo.head.commit.hexsha = "abc123def456"
         mock_repo_class.clone_from.return_value = mock_repo
 
-        with patch("pathlib.Path.exists", return_value=True), patch("shutil.rmtree"):
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("shutil.rmtree"),
+            patch(
+                "apm_cli.utils.git_env.git_worktree_head",
+                return_value="abc123def456",
+            ),
+        ):
             result = self.downloader.resolve_git_reference("user/repo#main")
 
             assert isinstance(result, ResolvedReference)
@@ -110,20 +117,21 @@ class TestGitHubPackageDownloader:
         mock_temp_dir = "/tmp/test"
         mock_mkdtemp.return_value = mock_temp_dir
 
-        from git.exc import GitCommandError
-
-        # First call (shallow clone) fails, second call (full clone) succeeds
         mock_repo = Mock()
         mock_commit = Mock()
         mock_commit.hexsha = "abcdef123456"
         mock_repo.commit.return_value = mock_commit
 
-        mock_repo_class.clone_from.side_effect = [
-            GitCommandError("shallow clone failed"),
-            mock_repo,
-        ]
+        mock_repo_class.clone_from.return_value = mock_repo
 
-        with patch("pathlib.Path.exists", return_value=True), patch("shutil.rmtree"):
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("shutil.rmtree"),
+            patch(
+                "apm_cli.utils.git_env.git_resolve_commit",
+                return_value="abcdef123456",
+            ),
+        ):
             result = self.downloader.resolve_git_reference("user/repo#abcdef1")
 
             assert result.ref_type == GitReferenceType.COMMIT
@@ -143,7 +151,18 @@ class TestGitHubPackageDownloader:
         mock_repo.active_branch.name = "master"
         mock_repo_class.clone_from.return_value = mock_repo
 
-        with patch("pathlib.Path.exists", return_value=True), patch("shutil.rmtree"):
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("shutil.rmtree"),
+            patch(
+                "apm_cli.utils.git_env.git_worktree_head",
+                return_value="deadbeef1234",
+            ),
+            patch(
+                "apm_cli.utils.git_env.git_current_branch",
+                return_value="master",
+            ),
+        ):
             result = self.downloader.resolve_git_reference("user/repo")
 
             assert isinstance(result, ResolvedReference)
@@ -162,7 +181,7 @@ class TestGitHubPackageDownloader:
 
     @patch("apm_cli.deps.github_downloader.Repo")
     @patch("apm_cli.deps.github_downloader.validate_apm_package")
-    @patch("apm_cli.deps.github_downloader.shutil.rmtree")
+    @patch("apm_cli.deps.github_downloader._rmtree")
     def test_download_package_success(self, mock_rmtree, mock_validate, mock_repo_class):
         """Test successful package download and validation."""
         # Setup target directory
@@ -258,7 +277,7 @@ class TestGitHubPackageDownloader:
 
     @patch("apm_cli.deps.github_downloader.Repo")
     @patch("apm_cli.deps.github_downloader.validate_apm_package")
-    @patch("apm_cli.deps.github_downloader.shutil.rmtree")
+    @patch("apm_cli.deps.github_downloader._rmtree")
     def test_download_package_commit_checkout(self, mock_rmtree, mock_validate, mock_repo_class):
         """Test package download with commit checkout."""
         # Setup target directory
@@ -284,11 +303,21 @@ class TestGitHubPackageDownloader:
             ref_name="abc123",
         )
 
-        with patch.object(self.downloader, "resolve_git_reference", return_value=mock_resolved_ref):
+        with (
+            patch.object(
+                self.downloader,
+                "resolve_git_reference",
+                return_value=mock_resolved_ref,
+            ),
+            patch("apm_cli.utils.git_env.checkout_git_worktree") as mock_checkout,
+        ):
             result = self.downloader.download_package("user/repo#abc123", target_path)
 
-            # Verify that git checkout was called for commit
-            mock_repo.git.checkout.assert_called_once_with("abc123def456")
+            mock_checkout.assert_called_once_with(
+                target_path,
+                "abc123def456",
+                env=self.downloader.git_env,
+            )
             assert result.package.name == "test-package"
 
     def test_get_clone_progress_callback(self):
@@ -1064,7 +1093,11 @@ class TestSubdirectoryPackageCommitSHA:
         with patch.dict(os.environ, {}, clear=True):
             downloader = GitHubPackageDownloader()
 
-        with patch.object(downloader, "_clone_with_fallback") as mock_clone:
+        with (
+            patch.object(downloader, "_clone_with_fallback") as mock_clone,
+            patch("apm_cli.utils.git_env.checkout_git_worktree") as mock_checkout,
+            patch("apm_cli.deps.github_downloader.validate_materialized_symlinks"),
+        ):
             mock_clone.return_value = mock_repo
 
             target = self.temp_dir / "my-skill"
@@ -1089,8 +1122,9 @@ class TestSubdirectoryPackageCommitSHA:
                 "SHA ref should use no_checkout=True"
             )
 
-            # Verify checkout was called with the SHA
-            mock_repo.git.checkout.assert_called_once_with(sha)
+            checkout_call = mock_checkout.call_args
+            assert checkout_call.args[1] == sha
+            assert checkout_call.kwargs["env"] is downloader.git_env
 
     @patch("apm_cli.deps.github_downloader.Repo")
     @patch("apm_cli.deps.github_downloader.validate_apm_package")

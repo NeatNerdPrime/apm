@@ -524,15 +524,14 @@ class TestRound3SafeRmtreeNotRobustRmtreeDirect:
         dep_ref = _make_subdir_dep(vpath="skills/x", ref="main")
         winning = gdv.AttemptSpec("plain HTTPS w/ credential helper", "https://x", {})
 
-        # Patch git.cmd.Git so init/fetch/ls_tree don't actually run.
+        completed = MagicMock(stdout="100644 blob abc\tskills/x")
         with (
             patch("apm_cli.deps.github_downloader_validation.safe_rmtree") as safe_rm_mock,
-            patch("apm_cli.deps.github_downloader_validation.git.cmd.Git") as MockGit,
+            patch(
+                "apm_cli.deps.github_downloader_validation.subprocess.run",
+                return_value=completed,
+            ),
         ):
-            MockGit.return_value.init = MagicMock()
-            MockGit.return_value.remote = MagicMock()
-            MockGit.return_value.fetch = MagicMock()
-            MockGit.return_value.ls_tree = MagicMock(return_value="100644 blob abc\tskills/x")
             ok = gdv._path_exists_in_tree_at_ref(
                 downloader,
                 dep_ref,

@@ -33,6 +33,13 @@
       "guards": ["transport-platform-git-cache-identity"]
     },
     {
+      "id": "git-child-repository-isolation",
+      "decision": "Git child-process repository location isolation",
+      "owner": "utils/git_env.py (git_subprocess_env / checkout_git_worktree)",
+      "selectors": ["src/apm_cli/utils/git_env.py"],
+      "guards": ["transport-platform-git-child-environment"]
+    },
+    {
       "id": "sparse-cone-symlink-validation",
       "decision": "Sparse-cone setup, dangling-symlink repair, and materialized symlink validation",
       "owner": "utils/git_sparse.py",

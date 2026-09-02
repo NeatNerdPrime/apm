@@ -44,7 +44,9 @@ class GitAuthEnvBuilder:
         but does not write to the downloader's token-state attributes;
         the caller is responsible for those assignments.
         """
-        env = self._token_manager.setup_environment()
+        from ..utils.git_env import git_subprocess_env
+
+        env = git_subprocess_env(self._token_manager.setup_environment())
 
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GIT_ASKPASS"] = "echo"
@@ -137,7 +139,9 @@ class GitAuthEnvBuilder:
         credentials through user helpers on HTTPS/SSH fallbacks; removing
         step 2 would leak them over plaintext HTTP.
         """
-        env = dict(base_git_env)
+        from ..utils.git_env import git_subprocess_env
+
+        env = git_subprocess_env(base_git_env)
         env["GIT_TERMINAL_PROMPT"] = "0"
         env.pop("GIT_ASKPASS", None)
 
