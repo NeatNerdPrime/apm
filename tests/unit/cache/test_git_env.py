@@ -3,7 +3,7 @@
 import os
 import subprocess
 import sys
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -204,3 +204,54 @@ class TestGitSubprocessEnv:
         assert child["GIT_CONFIG_COUNT"] == "2"
         assert child["GIT_CONFIG_KEY_1"] == "url.file:///fixture/.insteadOf"
         assert child["GIT_CONFIG_VALUE_1"] == "https://git.example.com/acme/repo"
+
+    @pytest.mark.parametrize(
+        ("replacement", "message"),
+        (
+            ("https://token@example.com/repo", "must not contain credentials"),
+            ("http://example.com/repo", "must not rewrite to insecure HTTP"),
+        ),
+    )
+    def test_clone_rejects_unsafe_parent_url_rewrites(
+        self, tmp_path, replacement: str, message: str
+    ) -> None:
+        parent = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": f"url.{replacement}.insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://git.example.com/acme/repo",
+        }
+        with (
+            patch.dict(os.environ, parent, clear=True),
+            patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
+            patch("apm_cli.utils.git_env.subprocess.run") as run,
+            pytest.raises(ValueError, match=message),
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env={"PATH": os.environ.get("PATH", "")},
+            )
+        run.assert_not_called()
+
+    def test_clone_streams_git_progress_to_reporter(self, tmp_path) -> None:
+        reporter = MagicMock()
+        handler = MagicMock()
+        reporter.new_message_handler.return_value = handler
+        process = MagicMock(returncode=0)
+
+        def stream(_process, _stdout_handler, stderr_handler, **_kwargs) -> None:
+            stderr_handler("Receiving objects: 50% (1/2)\n")
+
+        with (
+            patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
+            patch("apm_cli.utils.git_env.subprocess.Popen", return_value=process),
+            patch("git.cmd.handle_process_output", side_effect=stream),
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env={"PATH": os.environ.get("PATH", "")},
+                progress=reporter,
+            )
+
+        handler.assert_called_once_with("Receiving objects: 50% (1/2)\n")

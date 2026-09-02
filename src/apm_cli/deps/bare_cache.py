@@ -736,6 +736,7 @@ def clone_with_fallback(
             branch=clone_kwargs.get("branch"),
             no_checkout=bool(clone_kwargs.get("no_checkout")),
             extra_options=extra_options,
+            progress=progress_reporter,
         )
         repo_holder.append(_repo(target))
 

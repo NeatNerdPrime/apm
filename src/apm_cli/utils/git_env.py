@@ -23,8 +23,10 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Protocol
+from urllib.parse import urlsplit
 
 from apm_cli.utils.subprocess_env import external_process_env
 
@@ -118,7 +120,14 @@ def git_subprocess_error_text(exc: BaseException) -> str:
     return str(exc)
 
 
-def _append_parent_safe_git_config(env: dict[str, str]) -> None:
+class _GitProgress(Protocol):
+    """Git progress callback consumed by the clone subprocess adapter."""
+
+    def new_message_handler(self) -> Callable[[str], None]:
+        """Return a callback that parses one Git progress line."""
+
+
+def _append_parent_safe_git_config(env: dict[str, str], remote_url: str) -> None:
     """Retain parent config selection and URL rewrites, never auth channels."""
     for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
         if name not in env and name in os.environ:
@@ -144,6 +153,16 @@ def _append_parent_safe_git_config(env: dict[str, str]) -> None:
             and (key, value) not in existing
         ):
             continue
+        replacement = key[4 : -len(".insteadOf")]
+        if remote_url.startswith(value):
+            source = urlsplit(remote_url)
+            target = urlsplit(replacement)
+            if target.scheme.lower() in {"http", "https"} and (
+                target.username is not None or target.password is not None
+            ):
+                raise ValueError("Git URL rewrite replacement must not contain credentials")
+            if source.scheme.lower() == "https" and target.scheme.lower() == "http":
+                raise ValueError("HTTPS Git remote must not rewrite to insecure HTTP")
         env[f"GIT_CONFIG_KEY_{target_count}"] = key
         env[f"GIT_CONFIG_VALUE_{target_count}"] = value
         target_count += 1
@@ -161,6 +180,7 @@ def clone_git_worktree(
     branch: str | None = None,
     no_checkout: bool = False,
     extra_options: Sequence[str] = (),
+    progress: _GitProgress | None = None,
 ) -> None:
     """Clone a working tree with a complete sanitized child environment."""
     args = [get_git_executable(), "clone"]
@@ -174,15 +194,55 @@ def clone_git_worktree(
     args.extend(("--", url, str(target)))
     clone_env = git_subprocess_env(env)
     if env is not None:
-        _append_parent_safe_git_config(clone_env)
-    subprocess.run(
+        _append_parent_safe_git_config(clone_env, url)
+    if progress is None:
+        subprocess.run(
+            args,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=clone_env,
+        )
+        return
+
+    from git.cmd import handle_process_output
+
+    process = subprocess.Popen(
         args,
-        check=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=300,
         env=clone_env,
     )
+    stdout: list[str] = []
+    stderr: list[str] = []
+    progress_handler = progress.new_message_handler()
+
+    def capture_stderr(line: str) -> None:
+        stderr.append(line)
+        progress_handler(line)
+
+    try:
+        handle_process_output(
+            process,
+            stdout.append,
+            capture_stderr,
+            decode_streams=False,
+            kill_after_timeout=300,
+        )
+        process.wait(timeout=30)
+    except (RuntimeError, subprocess.TimeoutExpired):
+        process.kill()
+        process.wait()
+        raise subprocess.TimeoutExpired(args, 300) from None
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(
+            process.returncode,
+            args,
+            output="".join(stdout),
+            stderr="".join(stderr),
+        )
 
 
 def checkout_git_worktree(
