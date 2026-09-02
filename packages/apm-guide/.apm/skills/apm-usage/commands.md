@@ -30,6 +30,9 @@ validate replacement packages before publication. A failed download,
 validation, or activation leaves the previous package and lockfile active;
 fix the reported cause and rerun the command.
 
+`apm install` is safe to invoke from Git hooks: dependency Git operations
+ignore repository-locating variables inherited from the invoking worktree.
+
 For JavaScript hook bundles, `apm install --target copilot` and its
 `--target vscode` alias omit the generated `package.json` sidecar from
 project `.github/hooks/` and user `~/.copilot/hooks/` because Copilot

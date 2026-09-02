@@ -14,7 +14,6 @@ from tests.utils.local_package import LocalPackageFactory
 
 pytestmark = [pytest.mark.e2e, pytest.mark.integration]
 
-_REMOTE_URL = "https://github.com/acme/hook-proof"
 _SKILL_PATH = "skills/hook-proof"
 _SKILL_BYTES = b"---\nname: hook-proof\ndescription: Git hook isolation proof\n---\n# Hook proof\n"
 
@@ -32,9 +31,18 @@ def _git(cwd: Path, env: dict[str, str], *args: str) -> str:
     return result.stdout.strip()
 
 
+@pytest.mark.parametrize(
+    "remote_url",
+    (
+        "https://github.com/acme/hook-proof",
+        "https://git.example.com/acme/hook-proof",
+    ),
+    ids=("github", "generic-host"),
+)
 def test_apm_install_from_git_hook_preserves_invoking_worktree(
     tmp_path: Path,
     apm_binary_path: Path,
+    remote_url: str,
 ) -> None:
     """A real install cannot redirect Git into the invoking worktree."""
     isolated = IsolatedApmEnvironment.create(
@@ -50,13 +58,13 @@ def test_apm_install_from_git_hook_preserves_invoking_worktree(
     repositories = LocalGitRepositoryFactory(isolated.repository_root, env=environment)
     repository = repositories.create("hook-proof", source_tree=source.root)
     repositories.commit(repository, message="seed hook isolation proof")
-    child_env = repositories.url_rewrite_subprocess_env(repository, _REMOTE_URL)
+    child_env = repositories.url_rewrite_subprocess_env(repository, remote_url)
 
     consumer = LocalPackageFactory(isolated.work_root).create(
         "consumer",
         dependencies=(
             {
-                "git": _REMOTE_URL,
+                "git": remote_url,
                 "path": _SKILL_PATH,
                 "ref": "main",
             },

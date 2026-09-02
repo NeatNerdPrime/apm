@@ -324,6 +324,7 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 '"GIT_DIR"',
                 '"GIT_WORK_TREE"',
                 '"GIT_OBJECT_DIRECTORY"',
+                "def clone_git_worktree(",
                 "env=git_subprocess_env(env)",
             ),
             "utils/git_env.py must own ambient repository-state isolation",
@@ -350,7 +351,7 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
         ),
         (
             "src/apm_cli/deps/bare_cache.py",
-            ("env = git_subprocess_env(env)",),
+            ("env = git_subprocess_env(env)", "clone_git_worktree("),
         ),
         (
             "src/apm_cli/deps/github_downloader_validation.py",
@@ -389,6 +390,7 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 r"\.git\.checkout\("
                 r"|\brepo\.(commit|head|active_branch|refs|tags)\b"
                 r"|git\.cmd\.Git\(str\("
+                r"|\.clone_from\("
             ),
             "Repository-scoped GitPython operations must use utils/git_env",
             exempt=False,

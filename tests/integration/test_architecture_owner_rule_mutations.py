@@ -571,10 +571,10 @@ MUTATIONS: tuple[MutationCase, ...] = (
     MutationCase(
         guard_id="transport-platform-git-child-environment",
         rule_id="transport-platform-git-child-environment",
-        path="src/apm_cli/deps/github_downloader.py",
-        old="                env = git_subprocess_env(self.git_env)",
-        new="                env = {**os.environ, **(self.git_env or {})}",
-        intent="Generic-host sparse checkout restores ambient repository state.",
+        path="src/apm_cli/deps/bare_cache.py",
+        old="        clone_git_worktree(",
+        new="        _repo.clone_from(",
+        intent="Working-tree clones return to GitPython's ambient environment overlay.",
     ),
     MutationCase(
         guard_id="transport-platform-git-semver-preflight",

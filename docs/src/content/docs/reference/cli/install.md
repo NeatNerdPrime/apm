@@ -125,6 +125,9 @@ in `apm.yml`, then run `apm install` again.
   replacements to isolated staging paths and validate them before publication.
   If download, validation, or activation fails, APM keeps the previous package
   and lockfile active and exits non-zero with retry guidance.
+- **Git-hook isolation.** Dependency Git operations ignore repository-locating
+  variables inherited from an invoking Git hook, preserving the caller's branch
+  and HEAD.
 - **Instruction frontmatter preflight.** Malformed YAML always rejects the
   package before any of its primitives are deployed. Critical hidden characters
   decoded from metadata also prevent installation by default; `--force`

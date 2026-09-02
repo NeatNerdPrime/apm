@@ -1649,7 +1649,8 @@ class GitHubPackageDownloader:
                         try:
                             checkout_git_worktree(temp_clone_path, ref, env=self.git_env)
                         except Exception as e:
-                            raise RuntimeError(f"Failed to checkout commit {ref}: {e}") from e
+                            detail = self._sanitize_git_error(git_subprocess_error_text(e))
+                            raise RuntimeError(f"Failed to checkout commit {ref}: {detail}") from e
 
                     # Disable progress reporter after clone
                     if progress_reporter:
@@ -2025,7 +2026,7 @@ class GitHubPackageDownloader:
             if git_dir.exists():
                 _rmtree(git_dir)
 
-        except GitCommandError as e:
+        except (GitCommandError, subprocess.CalledProcessError) as e:
             # Check if this might be a private repository access issue
             if "Authentication failed" in str(e) or "remote: Repository not found" in str(e):
                 error_msg = f"Failed to clone repository {dep_ref.repo_url}. "

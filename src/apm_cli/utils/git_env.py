@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 from apm_cli.utils.subprocess_env import external_process_env
@@ -115,6 +116,36 @@ def git_subprocess_error_text(exc: BaseException) -> str:
             if isinstance(stream, str) and stream.strip():
                 return stream.strip()
     return str(exc)
+
+
+def clone_git_worktree(
+    url: str,
+    target: Path,
+    *,
+    env: dict[str, object] | None = None,
+    depth: int | None = None,
+    branch: str | None = None,
+    no_checkout: bool = False,
+    extra_options: Sequence[str] = (),
+) -> None:
+    """Clone a working tree with a complete sanitized child environment."""
+    args = [get_git_executable(), "clone"]
+    if depth is not None:
+        args.extend(("--depth", str(depth)))
+    if branch is not None:
+        args.extend(("--branch", branch))
+    if no_checkout:
+        args.append("--no-checkout")
+    args.extend(extra_options)
+    args.extend(("--", url, str(target)))
+    subprocess.run(
+        args,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=git_subprocess_env(env),
+    )
 
 
 def checkout_git_worktree(

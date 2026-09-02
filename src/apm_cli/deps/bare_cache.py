@@ -5,8 +5,8 @@ Extracted from :mod:`github_downloader` to keep that module under the
 
 Public entry points:
 
-* :func:`clone_with_fallback` -- working-tree clone via
-  ``Repo.clone_from``, threaded through a caller-supplied transport-plan
+* :func:`clone_with_fallback` -- sanitized working-tree clone threaded
+  through a caller-supplied transport-plan
   executor.
 * :func:`bare_clone_with_fallback` -- 3-tier bare-repo clone for the
   shared cache (the core fix for #1126).
@@ -695,13 +695,7 @@ def clone_with_fallback(
 
     Thin adapter over the caller-supplied ``execute_transport_plan``
     callable (typically ``self._execute_transport_plan``) that supplies
-    a working-tree clone action (``Repo.clone_from``). Behavior is
-    unchanged from the pre-#1126 implementation, except every clone
-    attempt now begins with a robust ``_rmtree`` of the target
-    for symmetry with the bare-clone path. This is strictly safer
-    (clean slate per attempt) and matches the existing behavior on
-    the second-and-subsequent attempts where target may contain a
-    partial clone from the failed first attempt.
+    a working-tree clone action with a complete sanitized environment.
 
     Returns:
         The successfully cloned :class:`Repo`.
@@ -711,25 +705,39 @@ def clone_with_fallback(
     """
     repo_holder: list[Repo] = []
     _repo = repo_cls if repo_cls is not None else Repo
+    supported = {"branch", "depth", "no_checkout", "single_branch"}
+    unsupported = sorted(set(clone_kwargs) - supported)
+    if unsupported:
+        raise TypeError(f"Unsupported clone options: {', '.join(unsupported)}")
 
     def _wt_action(url: str, env: dict[str, str], target: Path) -> None:
-        from ..utils.git_env import git_subprocess_env
+        from ..utils.git_env import clone_git_worktree, git_subprocess_env
 
-        # Pre-attempt cleanup: GitPython's Repo.clone_from refuses a
-        # non-empty target. Symmetric with _bare_action so retries
-        # always start from a clean slate. Behavior change from the
-        # pre-#1126 implementation - covered by 6.13.
+        # Retries always start from a clean target, matching the bare path.
         if target.exists():
             _rmtree(target)
-        repo_holder.append(
-            _repo.clone_from(
-                url,
-                target,
-                env=git_subprocess_env(env),
-                progress=progress_reporter,
-                **clone_kwargs,
+        if repo_cls is not None and repo_cls is not Repo:
+            repo_holder.append(
+                getattr(_repo, "clone_from")(
+                    url,
+                    target,
+                    env=git_subprocess_env(env),
+                    progress=progress_reporter,
+                    **clone_kwargs,
+                )
             )
+            return
+        extra_options = ("--single-branch",) if bool(clone_kwargs.get("single_branch")) else ()
+        clone_git_worktree(
+            url,
+            target,
+            env=env,
+            depth=clone_kwargs.get("depth"),
+            branch=clone_kwargs.get("branch"),
+            no_checkout=bool(clone_kwargs.get("no_checkout")),
+            extra_options=extra_options,
         )
+        repo_holder.append(_repo(target))
 
     execute_transport_plan(
         repo_url_base,
@@ -889,7 +897,9 @@ def build_clone_failure_message(
     error_msg += _ssh_key_auth_diagnostic(last_error, last_attempt_scheme)
 
     if last_error:
-        sanitized_error = sanitize_git_error(str(last_error))
+        from ..utils.git_env import git_subprocess_error_text
+
+        sanitized_error = sanitize_git_error(git_subprocess_error_text(last_error))
         error_msg += f" Last error: {sanitized_error}"
 
     return error_msg

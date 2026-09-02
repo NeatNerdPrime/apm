@@ -35,7 +35,7 @@
     {
       "id": "git-child-repository-isolation",
       "decision": "Git child-process repository location isolation",
-      "owner": "utils/git_env.py (git_subprocess_env / checkout_git_worktree)",
+      "owner": "utils/git_env.py (git_subprocess_env / clone_git_worktree / checkout_git_worktree)",
       "selectors": ["src/apm_cli/utils/git_env.py"],
       "guards": ["transport-platform-git-child-environment"]
     },

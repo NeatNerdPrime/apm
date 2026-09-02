@@ -217,7 +217,7 @@ class TestGitHubPackageDownloader:
 
     @patch("apm_cli.deps.github_downloader.Repo")
     @patch("apm_cli.deps.github_downloader.validate_apm_package")
-    @patch("apm_cli.deps.github_downloader.shutil.rmtree")
+    @patch("apm_cli.deps.github_downloader._rmtree")
     def test_download_package_validation_failure(self, mock_rmtree, mock_validate, mock_repo_class):
         """Test package download with validation failure."""
         # Setup target directory

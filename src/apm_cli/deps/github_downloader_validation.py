@@ -583,7 +583,7 @@ def _ref_exists_via_ls_remote(
         except (GitCommandError, OSError) as exc:
             log(
                 "  [x] ls-remote failed via anonymous-first GitHub HTTPS: "
-                f"{downloader._sanitize_git_error(git_subprocess_error_text(exc))}"
+                f"{downloader._sanitize_git_error(str(exc))}"
             )
             return False, None
 
@@ -691,7 +691,7 @@ def _path_exists_in_tree_at_ref(
         except (subprocess.CalledProcessError, OSError) as exc:
             log(
                 f"  [x] shallow fetch failed via {label}: "
-                f"{downloader._sanitize_git_error(str(exc))}"
+                f"{downloader._sanitize_git_error(git_subprocess_error_text(exc))}"
             )
             return False
 
