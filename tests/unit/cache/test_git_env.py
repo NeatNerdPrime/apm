@@ -1,6 +1,7 @@
 """Tests for git subprocess environment sanitization."""
 
 import os
+import subprocess
 import sys
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ from apm_cli.utils.git_env import (
     _STRIP_GIT_VARS,
     get_git_executable,
     git_subprocess_env,
+    git_subprocess_error_text,
     reset_git_cache,
 )
 
@@ -84,6 +86,17 @@ class TestGitSubprocessEnv:
             for var in _STRIP_GIT_VARS:
                 assert var not in env
 
+    def test_strips_repository_local_behavior_vars(self) -> None:
+        local_state = {
+            "GIT_GRAFT_FILE": "/repo/info/grafts",
+            "GIT_IMPLICIT_WORK_TREE": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_PREFIX": "nested/",
+        }
+        with patch.dict(os.environ, local_state):
+            env = git_subprocess_env()
+        assert not local_state.keys() & env.keys()
+
     def test_preserves_git_ssh_command(self) -> None:
         with patch.dict(os.environ, {"GIT_SSH_COMMAND": "ssh -i ~/.ssh/id_rsa"}):
             env = git_subprocess_env()
@@ -143,3 +156,12 @@ class TestGitSubprocessEnv:
         with patch.dict(os.environ, {"LD_LIBRARY_PATH": "/custom/lib"}, clear=True):
             env = git_subprocess_env()
             assert env["LD_LIBRARY_PATH"] == "/custom/lib"
+
+    def test_subprocess_error_text_prefers_captured_stderr(self) -> None:
+        exc = subprocess.CalledProcessError(
+            128,
+            ["git", "fetch"],
+            output=b"fallback output",
+            stderr=b"fatal: missing ref\n",
+        )
+        assert git_subprocess_error_text(exc) == "fatal: missing ref"

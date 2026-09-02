@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `apm install` launched from Git hooks now isolates dependency Git operations
+  from the invoking repository, preventing installs from detaching or mutating
+  the caller's branch. (#2759)
 - `apm install` no longer silently drops instruction Markdown whose
   unfenced bodies contain `---` horizontal rules. It now stops the whole package
   before deploying any primitive when instruction frontmatter is invalid YAML or

@@ -38,6 +38,7 @@ from ..models.apm_package import (
     RemoteRef,
     ResolvedReference,
 )
+from ..utils.git_env import git_subprocess_error_text
 from ..utils.github_host import (
     default_host,
     is_ado_auth_failure_signal,
@@ -350,7 +351,7 @@ class GitReferenceResolver:
                 bearer_also_failed=ado_bearer_also_failed,
             )
 
-        sanitized = host._sanitize_git_error(str(e))
+        sanitized = host._sanitize_git_error(git_subprocess_error_text(e))
         error_msg += f" Last error: {sanitized}"
         raise RuntimeError(error_msg) from e
 
@@ -523,7 +524,7 @@ class GitReferenceResolver:
                     resolved_commit = git_resolve_commit(temp_dir, ref, env=host.git_env)
                     ref_name = ref
                 except Exception as e:
-                    sanitized_error = host._sanitize_git_error(str(e))
+                    sanitized_error = host._sanitize_git_error(git_subprocess_error_text(e))
                     raise ValueError(  # noqa: B904
                         f"Could not resolve commit '{ref}' in repository "
                         f"{dep_ref.repo_url}: {sanitized_error}"
@@ -579,7 +580,7 @@ class GitReferenceResolver:
                                     )
 
                         except Exception as e:
-                            sanitized_error = host._sanitize_git_error(str(e))
+                            sanitized_error = host._sanitize_git_error(git_subprocess_error_text(e))
                             raise ValueError(  # noqa: B904
                                 f"Could not resolve reference '{ref}' in repository "
                                 f"{dep_ref.repo_url}: {sanitized_error}"
@@ -601,7 +602,7 @@ class GitReferenceResolver:
                             )
                             raise RuntimeError(error_msg)  # noqa: B904
                         else:
-                            sanitized_error = host._sanitize_git_error(str(e))
+                            sanitized_error = host._sanitize_git_error(git_subprocess_error_text(e))
                             raise RuntimeError(  # noqa: B904
                                 f"Failed to clone repository {dep_ref.repo_url}: {sanitized_error}"
                             )

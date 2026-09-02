@@ -206,6 +206,9 @@ harness. Critical security findings block the install; pass `--force` only
 if you understand the risk. See [Reference -> CLI commands](../../reference/cli/install/)
 for the full flag list.
 
+`apm install` is safe to invoke from Git hooks: dependency Git operations
+ignore repository-locating variables inherited from the invoking worktree.
+
 ## Pin a version
 
 Append `#<ref>` to a shorthand entry. `<ref>` can be a tag, branch, or

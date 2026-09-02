@@ -346,7 +346,7 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
         ),
         (
             "src/apm_cli/deps/github_downloader.py",
-            ("checkout_git_worktree(",),
+            ("checkout_git_worktree(", "env = git_subprocess_env(self.git_env)"),
         ),
         (
             "src/apm_cli/deps/bare_cache.py",
@@ -402,6 +402,17 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
             ("src/apm_cli/cache/git_cache.py",),
             re.compile(r"env if env is not None else git_subprocess_env\(\)"),
             "Git cache must sanitize explicit environments as well as ambient ones",
+            exempt=False,
+        )
+    )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            ("src/apm_cli/deps/github_downloader.py",),
+            re.compile(r"env\s*=\s*\{\*\*os\.environ"),
+            "Git downloader subprocess environments must use utils/git_env.py",
             exempt=False,
         )
     )

@@ -33,7 +33,12 @@ from ..utils.atomic_io import atomic_write_text
 from ..utils.console import (
     _rich_warning,  # noqa: F401  -- re-exported; tests patch github_downloader._rich_warning
 )
-from ..utils.git_env import checkout_git_worktree, git_worktree_head
+from ..utils.git_env import (
+    checkout_git_worktree,
+    git_subprocess_env,
+    git_subprocess_error_text,
+    git_worktree_head,
+)
 from ..utils.git_sparse import (
     apply_sparse_cone,
     repair_dangling_cone_symlinks,
@@ -1312,7 +1317,7 @@ class GitHubPackageDownloader:
                     base_env=self.git_env,
                 )
             else:
-                env = {**os.environ, **(self.git_env or {})}
+                env = git_subprocess_env(self.git_env)
             auth_url = self._build_repo_url(
                 dep_ref.repo_url,
                 use_ssh=False,
@@ -2035,7 +2040,7 @@ class GitHubPackageDownloader:
                 )
                 raise RuntimeError(error_msg) from e
             else:
-                sanitized_error = self._sanitize_git_error(str(e))
+                sanitized_error = self._sanitize_git_error(git_subprocess_error_text(e))
                 raise RuntimeError(
                     f"Failed to clone repository {dep_ref.repo_url}: {sanitized_error}"
                 ) from e

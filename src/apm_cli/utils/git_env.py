@@ -14,7 +14,8 @@ Git state variables stripped after external-process sanitization:
 - GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES
 - GIT_COMMON_DIR, GIT_NAMESPACE, GIT_INDEX_VERSION
 - GIT_CEILING_DIRECTORIES, GIT_DISCOVERY_ACROSS_FILESYSTEM
-- GIT_REPLACE_REF_BASE, GIT_GRAFTS_FILE, GIT_SHALLOW_FILE
+- GIT_REPLACE_REF_BASE, GIT_GRAFT_FILE, GIT_SHALLOW_FILE
+- GIT_IMPLICIT_WORK_TREE, GIT_NO_REPLACE_OBJECTS, GIT_PREFIX
 """
 
 from __future__ import annotations
@@ -46,8 +47,11 @@ _STRIP_GIT_VARS: frozenset[str] = frozenset(
         "GIT_CEILING_DIRECTORIES",
         "GIT_DISCOVERY_ACROSS_FILESYSTEM",
         "GIT_REPLACE_REF_BASE",
-        "GIT_GRAFTS_FILE",
+        "GIT_GRAFT_FILE",
         "GIT_SHALLOW_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_PREFIX",
     }
 )
 
@@ -100,6 +104,17 @@ def git_subprocess_env(overrides: dict[str, object] | None = None) -> dict[str, 
         for key, value in external_process_env(base).items()
         if key not in _STRIP_GIT_VARS
     }
+
+
+def git_subprocess_error_text(exc: BaseException) -> str:
+    """Return captured Git output when a subprocess exception provides it."""
+    if isinstance(exc, subprocess.CalledProcessError):
+        for stream in (exc.stderr, exc.stdout):
+            if isinstance(stream, bytes):
+                stream = stream.decode("utf-8", errors="replace")
+            if isinstance(stream, str) and stream.strip():
+                return stream.strip()
+    return str(exc)
 
 
 def checkout_git_worktree(

@@ -356,7 +356,7 @@ def fetch_sha_into_bare(
     def _rev_parse_present() -> bool:
         """Return True if sha is already reachable in the bare."""
         try:
-            # no env= needed -- purely local git plumbing, no network access
+            # Use the sanitized local environment even for non-network plumbing.
             result = subprocess.run(
                 [
                     git_exe,

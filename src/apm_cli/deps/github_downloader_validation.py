@@ -45,6 +45,7 @@ import requests
 from git.exc import GitCommandError
 
 from ..config import get_apm_temp_dir
+from ..utils.git_env import git_subprocess_error_text
 from ..utils.github_host import (
     default_host,
     is_github_hostname,
@@ -582,7 +583,7 @@ def _ref_exists_via_ls_remote(
         except (GitCommandError, OSError) as exc:
             log(
                 "  [x] ls-remote failed via anonymous-first GitHub HTTPS: "
-                f"{downloader._sanitize_git_error(str(exc))}"
+                f"{downloader._sanitize_git_error(git_subprocess_error_text(exc))}"
             )
             return False, None
 
@@ -704,7 +705,8 @@ def _path_exists_in_tree_at_ref(
             )
             output = result.stdout
         except (subprocess.CalledProcessError, OSError) as exc:
-            log(f"  [x] ls-tree failed via {label}: {downloader._sanitize_git_error(str(exc))}")
+            error = downloader._sanitize_git_error(git_subprocess_error_text(exc))
+            log(f"  [x] ls-tree failed via {label}: {error}")
             return False
 
         if output and output.strip():

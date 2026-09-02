@@ -1004,6 +1004,34 @@ class TestTrySparseCheckout:
         # env must contain the git header injected by the bearer auth ctx
         assert any("GIT_EXTRA_HEADER" in c["env"] for c in calls_seen)
 
+    def test_generic_host_sparse_checkout_strips_repository_state(
+        self, downloader: GitHubPackageDownloader, tmp_path: Path
+    ) -> None:
+        dep = _make_dep(host="git.example.com")
+        downloader._strategies.build_repo_url = MagicMock(
+            return_value="https://git.example.com/o/r"
+        )
+        downloader.git_env = {
+            "PATH": "/usr/bin",
+            "GIT_DIR": "/invoking/.git",
+            "GIT_WORK_TREE": "/invoking",
+        }
+        downloader.auth_resolver.resolve_for_dep.return_value = None
+        ok_result = MagicMock(returncode=0, stderr="")
+        environments: list[dict[str, str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: Any) -> MagicMock:
+            environments.append(kwargs["env"])
+            return ok_result
+
+        with patch("apm_cli.deps.github_downloader.subprocess.run", side_effect=fake_run):
+            result = downloader._try_sparse_checkout(dep, tmp_path / "sparse", "skills/foo", "main")
+
+        assert result is True
+        assert environments
+        assert all("GIT_DIR" not in env for env in environments)
+        assert all("GIT_WORK_TREE" not in env for env in environments)
+
 
 # ---------------------------------------------------------------------------
 # download_package routing
