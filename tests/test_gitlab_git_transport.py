@@ -17,6 +17,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import Mock, patch
+from urllib.parse import urlparse
 
 import pytest
 
@@ -663,6 +664,40 @@ class TestGitlabGitTransportIntegration:
         assert result == expected
         mock_git.return_value.fetch_file.assert_called_once()
         mock_api.assert_not_called()
+
+    def test_gitlab_path_pat_uses_header_and_tokenless_url(self) -> None:
+        """Path-scoped GitLab fetches keep PATs out of argv and local config."""
+        from apm_cli.deps.github_downloader import GitHubPackageDownloader
+
+        token = "glpat-path-token"
+        dep_ref = _make_gitlab_dep("gitlab.com")
+        with (
+            patch.dict(os.environ, {"GITLAB_APM_PAT": token}, clear=True),
+            _CRED_FILL_PATCH,
+        ):
+            downloader = GitHubPackageDownloader()
+            with patch(
+                "apm_cli.deps.download_strategies.GitSparseFileTransport",
+                return_value=_mock_git_transport(return_value=b"content"),
+            ) as transport:
+                downloader._download_github_file(
+                    dep_ref,
+                    "agents/spec.agent.md",
+                    "main",
+                )
+
+        kwargs = transport.call_args.kwargs
+        url = kwargs["build_repo_url_fn"](dep_ref.repo_url, dep_ref=dep_ref)
+        parsed = urlparse(url)
+        assert parsed.username is None
+        assert parsed.password is None
+        assert parsed.hostname == "gitlab.com"
+        assert "GIT_TOKEN" not in kwargs["git_env"]
+        assert any(
+            value.startswith("Authorization: Basic ")
+            for key, value in kwargs["git_env"].items()
+            if key.startswith("GIT_CONFIG_VALUE_")
+        )
 
     def test_gitlab_pat_fallback_when_git_fails(self) -> None:
         """Thin GITLAB_PAT fallback: REST API called when git transport raises."""

@@ -164,7 +164,12 @@ def bare_clone_with_fallback(
     the cache boundary. See design.md sec 12 (Bare integrity
     verification).
     """
-    from ..utils.git_env import get_git_executable, git_subprocess_env
+    from ..utils.git_env import (
+        get_git_executable,
+        git_clone_env,
+        git_network_env,
+        git_subprocess_env,
+    )
 
     git_exe = get_git_executable()
 
@@ -194,12 +199,14 @@ def bare_clone_with_fallback(
                 # below redacts the URL after a successful clone so the
                 # token does not persist on disk.
                 try:
+                    env = git_network_env(url, env)
                     subprocess.run(
                         [git_exe, "init", "--bare", str(target)],
                         env=env,
                         check=True,
                         capture_output=True,
                     )
+                    env = git_network_env(url, env, git_dir=target)
                     subprocess.run(
                         [git_exe, "--git-dir", str(target), "remote", "add", "origin", url],
                         env=env,
@@ -231,6 +238,7 @@ def bare_clone_with_fallback(
             # Tier 2: full bare clone, validate SHA, set HEAD.
             if target.exists():
                 _rmtree(target)
+            env = git_clone_env(url, env, target, bare=True)
             subprocess.run(
                 [git_exe, "clone", "--bare", url, str(target)],
                 env=env,
@@ -274,6 +282,7 @@ def bare_clone_with_fallback(
         if ref:
             args += ["--branch", ref]
         args += [url, str(target)]
+        env = git_clone_env(url, env, target, bare=True)
         try:
             subprocess.run(args, env=env, check=True, capture_output=True, timeout=300)
             _scrub_bare_remote_url(target, git_exe, env)
@@ -281,6 +290,7 @@ def bare_clone_with_fallback(
         except subprocess.CalledProcessError:
             # Tier 2: full bare clone (no shallow, no --branch).
             _rmtree(target)
+            env = git_clone_env(url, env, target, bare=True)
             subprocess.run(
                 [git_exe, "clone", "--bare", url, str(target)],
                 env=env,
@@ -348,7 +358,7 @@ def fetch_sha_into_bare(
     Returns:
         ``True`` if the SHA is now present in the bare, ``False`` otherwise.
     """
-    from ..utils.git_env import get_git_executable, git_subprocess_env
+    from ..utils.git_env import get_git_executable, git_network_env, git_subprocess_env
 
     git_exe = get_git_executable()
     local_env = git_subprocess_env()
@@ -455,9 +465,10 @@ def fetch_sha_into_bare(
         )
 
         def _fetch_action_sha(url: str, env: dict[str, str], target: Path) -> None:
+            network_env = git_network_env(url, env, git_dir=target)
             subprocess.run(
                 [git_exe, "--git-dir", str(target), "fetch", "--depth=1", url, sha],
-                env=git_subprocess_env(env),
+                env=network_env,
                 check=True,
                 capture_output=True,
                 timeout=300,
@@ -498,9 +509,10 @@ def fetch_sha_into_bare(
     _log.debug("fetch_sha_into_bare: broadening shallow in %s to find %s", bare_path, sha[:12])
 
     def _fetch_action_broad(url: str, env: dict[str, str], target: Path) -> None:
+        network_env = git_network_env(url, env, git_dir=target)
         subprocess.run(
             [git_exe, "--git-dir", str(target), "fetch", f"--depth={broad_depth}", url],
-            env=git_subprocess_env(env),
+            env=network_env,
             check=True,
             capture_output=True,
             timeout=300,
@@ -593,7 +605,7 @@ def materialize_from_bare(
         The resolved commit SHA. Caller threads this into
         ``resolved_commit`` for the lockfile.
     """
-    from ..utils.git_env import get_git_executable, git_subprocess_env
+    from ..utils.git_env import get_git_executable, git_no_hooks_args, git_subprocess_env
 
     git_exe = get_git_executable()
     env = git_subprocess_env(env)
@@ -617,6 +629,7 @@ def materialize_from_bare(
     subprocess.run(
         [
             git_exe,
+            *git_no_hooks_args(),
             "clone",
             "--local",
             "--shared",
@@ -660,7 +673,14 @@ def materialize_from_bare(
     if sparse_paths:
         apply_sparse_cone(git_exe, consumer_dir, list(sparse_paths), env=env)
     subprocess.run(
-        [git_exe, "-C", str(consumer_dir), "checkout", checkout_target],
+        [
+            git_exe,
+            *git_no_hooks_args(),
+            "-C",
+            str(consumer_dir),
+            "checkout",
+            checkout_target,
+        ],
         capture_output=True,
         text=True,
         timeout=60,

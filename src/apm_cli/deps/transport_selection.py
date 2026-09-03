@@ -17,11 +17,11 @@ opts in via ``--allow-protocol-fallback`` or ``APM_ALLOW_PROTOCOL_FALLBACK=1``.
 from __future__ import annotations
 
 import os
-import subprocess
 import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 # Public env vars (also recognized by CLI flag plumbing).
 ENV_PROTOCOL = "APM_GIT_PROTOCOL"
@@ -63,17 +63,22 @@ class TransportAttempt:
     """A single clone attempt in the transport plan.
 
     Attributes:
-        scheme: ``"ssh"``, ``"https"``, or ``"http"``. Drives the URL
-            builder.
-        use_token: When ``True`` the orchestrator embeds the resolved auth
-            token in the HTTPS URL (auth-HTTPS). Only meaningful for
-            authenticated HTTPS attempts.
+        scheme: ``"ssh"``, ``"https"``, ``"http"``, or the scheme of an
+            exact safe URL rewrite such as ``"file"``. Drives the URL builder.
+        use_token: When ``True`` the orchestrator selects the resolved
+            credential environment for an authenticated HTTPS attempt. The URL
+            remains credential-free.
         label: Human-readable description for log/error output.
+        requested_url: Original URL Git must receive so it applies a configured
+            rewrite exactly once.
+        effective_url: Resolved rewrite target used for policy and diagnostics.
     """
 
     scheme: str
     use_token: bool
     label: str
+    requested_url: str | None = None
+    effective_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -130,65 +135,42 @@ class GitConfigInsteadOfResolver:
 
     def __init__(self) -> None:
         self._rewrites: list[tuple] | None = None  # list of (insteadof_value, target_base)
+        self._has_authorization = False
         self._lock = threading.Lock()
 
     def resolve(self, candidate_url: str) -> str | None:
         if self._rewrites is None:
             with self._lock:
                 if self._rewrites is None:
-                    self._rewrites = self._load_rewrites()
-        best_prefix = ""
-        best_base = ""
-        for insteadof_value, target_base in self._rewrites:
-            if candidate_url.startswith(insteadof_value) and len(insteadof_value) > len(
-                best_prefix
-            ):
-                best_prefix = insteadof_value
-                best_base = target_base
-        if best_prefix:
-            return best_base + candidate_url[len(best_prefix) :]
-        return None
+                    self._rewrites, self._has_authorization = self._load_rewrites()
+        from ..utils.git_env import (
+            resolve_git_url_rewrite,
+            validate_resolved_git_url_rewrite,
+        )
+
+        effective = resolve_git_url_rewrite(candidate_url, self._rewrites)
+        if effective is not None:
+            validate_resolved_git_url_rewrite(
+                candidate_url,
+                effective,
+                has_authorization=self._has_authorization,
+            )
+        return effective
 
     @staticmethod
-    def _load_rewrites() -> list[tuple]:
+    def _load_rewrites() -> tuple[list[tuple], bool]:
         """Load all ``url.*.insteadof`` entries from the user's git config.
 
         Returns an empty list if git is missing, exits non-zero, or no
         rewrites are configured.
         """
-        from ..utils.git_env import get_git_executable, git_subprocess_env
+        from ..utils.git_env import configured_git_url_policy
 
         try:
-            result = subprocess.run(
-                [
-                    get_git_executable(),
-                    "config",
-                    "--get-regexp",
-                    r"^url\..*\.insteadof$",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=git_subprocess_env(),
-            )
-        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-            return []
-        if result.returncode != 0 or not result.stdout.strip():
-            return []
-        rewrites: list[tuple] = []
-        suffix = ".insteadof"
-        for line in result.stdout.splitlines():
-            parts = line.split(None, 1)
-            if len(parts) != 2:
-                continue
-            key, insteadof_value = parts
-            key_lower = key.lower()
-            if not (key_lower.startswith("url.") and key_lower.endswith(suffix)):
-                continue
-            base = key[4 : -len(suffix)]
-            if base:
-                rewrites.append((insteadof_value, base))
-        return rewrites
+            rewrites, has_authorization = configured_git_url_policy()
+            return list(rewrites), has_authorization
+        except (FileNotFoundError, OSError, ValueError):
+            return [], False
 
 
 def is_fallback_allowed(cli_flag: bool = False, env: dict | None = None) -> bool:
@@ -251,6 +233,7 @@ class TransportSelector:
         cli_pref: ProtocolPreference = ProtocolPreference.NONE,
         allow_fallback: bool = False,
         has_token: bool = False,
+        candidate_url: str | None = None,
     ) -> TransportPlan:
         """Compute the transport plan for ``dep_ref``.
 
@@ -303,17 +286,41 @@ class TransportSelector:
         #    insteadOf rewrites to pick the initial protocol.
         prefer_ssh = cli_pref == ProtocolPreference.SSH
         prefer_https = cli_pref == ProtocolPreference.HTTPS
+        rewritten_url: str | None = None
         if cli_pref == ProtocolPreference.NONE:
-            # Build the candidate HTTPS URL from the dep and ask the resolver.
-            host = getattr(dep_ref, "host", None) or "github.com"
-            candidate = f"https://{host}/{getattr(dep_ref, 'repo_url', '')}"
+            # Callers pass the canonical URL builder's output. The fallback
+            # keeps isolated selector tests and legacy consumers compatible.
+            candidate = candidate_url
+            if candidate is None:
+                builder = getattr(dep_ref, "to_github_url", None)
+                candidate = (
+                    builder()
+                    if callable(builder)
+                    else (
+                        f"https://{getattr(dep_ref, 'host', None) or 'github.com'}/"
+                        f"{getattr(dep_ref, 'repo_url', '')}"
+                    )
+                )
             rewrite = self._resolver.resolve(candidate)
             if rewrite and not rewrite.lower().startswith(("https://", "http://")):
                 # Resolver mapped HTTPS -> non-HTTPS form (typically git@host:..). Prefer SSH.
                 prefer_ssh = True
+                rewritten_url = rewrite
 
         if prefer_ssh:
-            initial = [_SSH]
+            initial = (
+                [
+                    TransportAttempt(
+                        scheme=urlsplit(rewritten_url).scheme.lower() or "ssh",
+                        use_token=False,
+                        label=f"Git URL rewrite ({urlsplit(rewritten_url).scheme or 'ssh'})",
+                        requested_url=candidate,
+                        effective_url=rewritten_url,
+                    )
+                ]
+                if rewritten_url is not None
+                else [_SSH]
+            )
             chained = [_AUTH_HTTPS, _PLAIN_HTTPS] if has_token else [_PLAIN_HTTPS]
         elif prefer_https:
             initial = [_AUTH_HTTPS] if has_token else [_PLAIN_HTTPS]

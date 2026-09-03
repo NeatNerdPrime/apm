@@ -364,12 +364,18 @@ class TestListRemoteRefs:
             resolver = GitReferenceResolver(host)
             resolver.list_remote_refs(dep)
         host._build_noninteractive_git_env.assert_called_once()
-        host._build_repo_url.assert_called_once_with(
+        host._build_repo_url.assert_any_call(
             "owner/repo",
             use_ssh=False,
             dep_ref=dep,
-            token=None,
+            token="",
             auth_scheme="basic",
+        )
+        host._build_repo_url.assert_any_call(
+            "owner/repo",
+            use_ssh=False,
+            dep_ref=dep,
+            token="",
         )
 
     def test_ssh_preference_selects_ssh_without_token_auth(self):
@@ -389,12 +395,18 @@ class TestListRemoteRefs:
             resolver = GitReferenceResolver(host)
             resolver.list_remote_refs(dep)
 
-        host._build_repo_url.assert_called_once_with(
+        host._build_repo_url.assert_any_call(
             "owner/repo",
             use_ssh=True,
             dep_ref=dep,
             token=None,
             auth_scheme="basic",
+        )
+        host._build_repo_url.assert_any_call(
+            "owner/repo",
+            use_ssh=False,
+            dep_ref=dep,
+            token="",
         )
         host._build_noninteractive_git_env.assert_called_once()
         host.auth_resolver.execute_with_bearer_fallback.assert_not_called()

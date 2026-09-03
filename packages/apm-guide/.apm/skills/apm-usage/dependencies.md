@@ -132,6 +132,12 @@ git config --global url."git@github.com:".insteadOf "https://github.com/"
 apm install owner/repo                 # APM clones over SSH
 ```
 
+Safe rewrites remain active. APM rejects replacements that contain HTTP(S)
+credentials, downgrade HTTPS to an insecure transport, or redirect an
+authenticated HTTPS request to another origin. Run
+`git config --show-origin --get-regexp '^url\..*\.insteadOf$'` to locate a
+rejected rule.
+
 Restore the legacy permissive chain (escape hatch -- not a long-term
 setting):
 

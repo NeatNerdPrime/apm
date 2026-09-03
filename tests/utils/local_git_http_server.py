@@ -190,6 +190,12 @@ class LocalGitHttpServerFactory:
         if certfile is not None or keyfile is not None:
             if certfile is None or keyfile is None:
                 raise ValueError("TLS requires both certfile and keyfile")
+            try:
+                import truststore
+
+                truststore.extract_from_ssl()
+            except Exception:
+                pass
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(certfile=certfile, keyfile=keyfile)

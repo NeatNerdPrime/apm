@@ -154,7 +154,24 @@ class TestShorthandWithInsteadOf:
             has_token=True,
         )
         assert _scheme_labels(plan) == ["ssh"]
+        assert plan.attempts[0].requested_url == "https://github.com/owner/repo"
+        assert plan.attempts[0].effective_url == "git@github.com:owner/repo"
+        assert plan.attempts[0].use_token is False
         assert plan.strict is True
+
+    def test_canonical_candidate_preserves_custom_port_and_suffix(self):
+        candidate = "https://git.example.test:8443/acme/repo.git"
+        resolver = FakeInsteadOfResolver(
+            {"https://git.example.test:8443/": "ssh://git@git.example.test:8443/"}
+        )
+        plan = TransportSelector(insteadof_resolver=resolver).select(
+            dep_ref=_dep("git.example.test:8443/acme/repo"),
+            candidate_url=candidate,
+        )
+
+        assert resolver.calls == [candidate]
+        assert plan.attempts[0].requested_url == candidate
+        assert plan.attempts[0].effective_url == "ssh://git@git.example.test:8443/acme/repo.git"
 
     def test_no_insteadof_defaults_to_https_strict(self):
         sel = TransportSelector(insteadof_resolver=FakeInsteadOfResolver())
@@ -346,10 +363,10 @@ class TestGitConfigInsteadOfResolver:
     def test_lookup_cached_per_instance(self):
         """`git config --get-regexp` is shelled out at most once per instance."""
         resolver = GitConfigInsteadOfResolver()
-        with patch("apm_cli.deps.transport_selection.subprocess.run") as run:
+        with patch("apm_cli.utils.git_env._git_config_run") as run:
             # Simulate one rewrite rule: https://github.com/ -> git@github.com:
             run.return_value.returncode = 0
-            run.return_value.stdout = "url.git@github.com:.insteadof https://github.com/\n"
+            run.return_value.stdout = b"url.git@github.com:.insteadof\nhttps://github.com/\0"
             resolver.resolve("https://github.com/owner/repo")
             resolver.resolve("https://github.com/other/proj")
             resolver.resolve("https://gitlab.com/acme/lib")
@@ -371,10 +388,10 @@ class TestGitConfigInsteadOfResolver:
                     "GIT_DIR": "/hook/repo.git",
                 },
             ),
-            patch("apm_cli.deps.transport_selection.subprocess.run") as run,
+            patch("apm_cli.utils.git_env._git_config_run") as run,
         ):
-            run.return_value.returncode = 0
-            run.return_value.stdout = ""
+            run.return_value.returncode = 1
+            run.return_value.stdout = b""
             resolver.resolve("https://github.com/owner/repo")
             _args, kwargs = run.call_args
             assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == "/home/test/.gitconfig"
@@ -382,7 +399,7 @@ class TestGitConfigInsteadOfResolver:
 
     def test_resolve_returns_none_when_no_rewrites(self):
         resolver = GitConfigInsteadOfResolver()
-        with patch("apm_cli.deps.transport_selection.subprocess.run") as run:
-            run.return_value.returncode = 0
-            run.return_value.stdout = ""
+        with patch("apm_cli.utils.git_env._git_config_run") as run:
+            run.return_value.returncode = 1
+            run.return_value.stdout = b""
             assert resolver.resolve("https://github.com/owner/repo") is None

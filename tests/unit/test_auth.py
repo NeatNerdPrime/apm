@@ -1067,11 +1067,13 @@ class TestBuildGitEnvBearerIsolation:
         value_slots = [v for k, v in env.items() if k.startswith("GIT_CONFIG_VALUE_")]
         assert any("fresh-jwt-from-az-cli" in v for v in value_slots)
 
-    def test_basic_scheme_still_sets_git_token(self):
-        """Non-bearer path keeps the legacy GIT_TOKEN behaviour."""
+    def test_github_basic_scheme_uses_header(self):
+        """GitHub PATs stay out of argv-compatible raw token channels."""
         with patch.dict(os.environ, {}, clear=True):
             env = AuthResolver._build_git_env("a-pat", scheme="basic", host_kind="github")
-        assert env.get("GIT_TOKEN") == "a-pat"
+        assert "GIT_TOKEN" not in env
+        values = [value for key, value in env.items() if key.startswith("GIT_CONFIG_VALUE_")]
+        assert any(value.startswith("Authorization: Basic ") for value in values)
 
     def test_ado_git_env_strips_raw_github_token_sources(self):
         """Only the selected ADO credential reaches the git subprocess."""

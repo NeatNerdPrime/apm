@@ -382,7 +382,6 @@ def _validate_ado_git_package(
     Returns True when the repo is reachable, False otherwise.
     Raises ``AuthenticationError`` for auth failures on non-generic managed hosts.
     """
-    import subprocess
 
     from apm_cli.deps.github_downloader import GitHubPackageDownloader
     from apm_cli.deps.transport_selection import is_fallback_allowed
@@ -400,11 +399,9 @@ def _validate_ado_git_package(
             )
         return True
 
-    # Determine host type before building the URL so we know whether to
-    # embed a token.  Generic (non-GitHub, non-ADO) hosts are excluded
-    # from APM-managed auth; they rely on git credential helpers via the
-    # relaxed validate_env below. GitLab hosts are managed when classified
-    # as GitLab because they need oauth2 HTTPS token formatting.
+    # Determine host type before building the credential environment. Generic
+    # (non-GitHub, non-ADO) hosts rely on git credential helpers via the relaxed
+    # validate_env below. GitLab hosts use managed header authentication.
     is_gitlab = (
         auth_resolver.classify_host(
             dep_ref.host,
@@ -419,15 +416,14 @@ def _validate_ado_git_package(
         and not is_gitlab
     )
 
-    # For GHES / ADO: resolve per-dependency auth up front so the URL
-    # carries an embedded token and avoids triggering OS credential
-    # helper popups during git ls-remote validation.
-    _url_token = None
+    # Resolve managed-host authentication up front so git ls-remote receives a
+    # noninteractive Authorization header without putting credentials in argv.
+    _resolved_token = None
     _dep_ctx = None
     _auth_scheme = "basic"
     if not is_generic:
         _dep_ctx = auth_resolver.resolve_for_dep(dep_ref)
-        _url_token = _dep_ctx.token
+        _resolved_token = _dep_ctx.token
         _auth_scheme = getattr(_dep_ctx, "auth_scheme", "basic") or "basic"
 
     ado_downloader = GitHubPackageDownloader(auth_resolver=auth_resolver)
@@ -435,14 +431,13 @@ def _validate_ado_git_package(
     if dep_ref.host:
         ado_downloader.github_host = dep_ref.host
 
-    # Build authenticated URL using the resolved per-dep token.
-    # #1015: pass auth_scheme so bearer tokens use extraheader
-    # injection instead of embedding a ~1.5KB JWT in the userinfo.
+    # Build the credential-free URL; the resolved credential stays in the
+    # process-scoped Git configuration.
     package_url = ado_downloader._build_repo_url(
         dep_ref.repo_url,
         use_ssh=False,
         dep_ref=dep_ref,
-        token=_url_token,
+        token="",
         auth_scheme=_auth_scheme,
     )
 
@@ -549,14 +544,13 @@ def _validate_ado_git_package(
 
     result = None
     for probe_url in urls_to_try:
-        cmd = ["git", "ls-remote", "--heads", "--exit-code", probe_url]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
+        from ..utils.git_env import git_remote_refs
+
+        result = git_remote_refs(
+            probe_url,
             timeout=30,
             env=validate_env,
+            options=("--heads", "--exit-code"),
         )
         _log_attempt_result(probe_url, result)
         if result.returncode == 0:
@@ -570,7 +564,7 @@ def _validate_ado_git_package(
         and result.returncode != 0
         and dep_ref.is_azure_devops()
         and auth_resolver._supports_ado_bearer(dep_ref.host or "")
-        and _url_token is not None  # we had a PAT
+        and _resolved_token is not None  # we had a PAT
         and is_ado_auth_failure_signal(result.stderr or "")
     ):
         try:
@@ -601,14 +595,11 @@ def _validate_ado_git_package(
                         host_kind="ado",
                         base_env=ado_downloader.git_env,
                     )
-                    cmd = ["git", "ls-remote", "--heads", "--exit-code", bearer_url]
-                    bearer_result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
+                    bearer_result = git_remote_refs(
+                        bearer_url,
                         timeout=30,
                         env=bearer_env,
+                        options=("--heads", "--exit-code"),
                     )
                     if bearer_result.returncode == 0:
                         # Emit deferred stale-PAT warning via resolver

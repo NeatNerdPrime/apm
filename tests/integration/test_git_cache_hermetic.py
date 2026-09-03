@@ -183,6 +183,15 @@ class TestResolveSha:
 
 
 class TestLsRemoteResolve:
+    @pytest.fixture(autouse=True)
+    def _validated_rewrites(self):
+        """Keep subprocess mocks focused on ls-remote after policy validation."""
+        with patch(
+            "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
+            return_value=None,
+        ):
+            yield
+
     def test_returns_head_sha_when_ref_is_none(self, cache: GitCache) -> None:
         sha = "1" * 40
         with (
@@ -212,8 +221,8 @@ class TestLsRemoteResolve:
             )
 
         assert result == sha
-        sanitize.assert_called_once_with(explicit_env)
-        assert mock_run.call_args.kwargs["env"] == {"DEFAULT": "1"}
+        sanitize.assert_any_call(explicit_env)
+        assert mock_run.call_args.kwargs["env"]["DEFAULT"] == "1"
 
     def test_uses_default_git_env_when_env_not_provided(self, cache: GitCache) -> None:
         sha = "3" * 40
@@ -335,6 +344,15 @@ class TestLsRemoteResolve:
 
 
 class TestEnsureBareRepo:
+    @pytest.fixture(autouse=True)
+    def _validated_rewrites(self):
+        """Keep subprocess mocks focused on clone after policy validation."""
+        with patch(
+            "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
+            return_value=None,
+        ):
+            yield
+
     def test_existing_bare_repo_with_sha_is_reused(self, cache: GitCache) -> None:
         shard_key = cache_shard_key("https://example.com/repo.git")
         bare_dir = cache._db_root / shard_key
@@ -455,6 +473,15 @@ class TestEnsureBareRepo:
 
 
 class TestCreateCheckout:
+    @pytest.fixture(autouse=True)
+    def _validated_rewrites(self):
+        """Keep subprocess mocks focused on checkout after policy validation."""
+        with patch(
+            "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
+            return_value=None,
+        ):
+            yield
+
     def test_write_dedup_hit_under_lock_returns_existing_checkout(self, cache: GitCache) -> None:
         url = "https://example.com/repo.git"
         shard_key = cache_shard_key(url)
@@ -665,6 +692,15 @@ class TestFetchIntoBare:
 
 
 class TestFetchIntoBareLocked:
+    @pytest.fixture(autouse=True)
+    def _validated_rewrites(self):
+        """Keep subprocess mocks focused on fetch after policy validation."""
+        with patch(
+            "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
+            return_value=None,
+        ):
+            yield
+
     def test_fetches_specific_sha_successfully(self, cache: GitCache, tmp_path: Path) -> None:
         bare_dir = tmp_path / "bare.git"
         bare_dir.mkdir()

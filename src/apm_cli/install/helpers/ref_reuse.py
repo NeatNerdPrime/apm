@@ -140,21 +140,44 @@ def maybe_resolve_git_semver(
         from apm_cli.deps.transport_selection import ProtocolPreference
 
         protocol_pref = ProtocolPreference.NONE
+    rewrite_candidate = dep_ref.to_github_url()
+    if not dep_ref.is_azure_devops() and not rewrite_candidate.endswith(".git"):
+        rewrite_candidate = f"{rewrite_candidate}.git"
     transport_plan = transport_selector.select(
         dep_ref=dep_ref,
         cli_pref=protocol_pref,
         allow_fallback=False,
         has_token=bool(token),
+        candidate_url=rewrite_candidate,
     )
-    selected_scheme = transport_plan.attempts[0].scheme
-    transport_scheme = "ssh" if selected_scheme == "ssh" else "https"
+    selected_attempt = transport_plan.attempts[0]
+    selected_scheme = selected_attempt.scheme
+    transport_scheme = (
+        "https"
+        if selected_attempt.requested_url is not None
+        else ("ssh" if selected_scheme == "ssh" else "https")
+    )
+    resolver_token = None if selected_attempt.requested_url is not None else token
+    resolver_git_env = git_env
+    if selected_attempt.requested_url is not None:
+        from apm_cli.core.auth import AuthResolver
+
+        resolver_git_env = AuthResolver.build_noninteractive_git_env(
+            base_env=git_env or {},
+            host_kind=AuthResolver.classify_host(
+                dep_ref.host or "github.com",
+                port=dep_ref.port,
+                host_type=dep_ref.host_type,
+            ).kind,
+        )
+        AuthResolver._clear_platform_token_env(resolver_git_env, remove=True)
     ref_resolver = get_shared_ref_resolver(
         dep_ref.host,
-        token,
+        resolver_token,
         ref_resolver_cache,
         ref_resolver_cache_lock,
         auth_scheme=auth_scheme,
-        git_env=git_env,
+        git_env=resolver_git_env,
         auth_resolver=auth_resolver,
         auth_target=dep_ref.host,
         transport_scheme=transport_scheme,
@@ -166,9 +189,12 @@ def maybe_resolve_git_semver(
         package_name=package_name,
         constraint=constraint,
         remote_url=(
-            dep_ref.to_github_url()
-            if transport_scheme == "https" and dep_ref.is_azure_devops()
-            else None
+            selected_attempt.requested_url
+            or (
+                dep_ref.to_github_url()
+                if transport_scheme == "https" and dep_ref.is_azure_devops()
+                else None
+            )
         ),
     )
 

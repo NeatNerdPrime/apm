@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlparse
 
 import pytest
@@ -73,6 +74,40 @@ def test_auth_failure_is_not_classified_as_filter_rejection() -> None:
     )
 
     assert _partial_clone_filter_unsupported(failure) is False
+
+
+def test_sparse_cache_hit_validates_promisor_network_environment(tmp_path: Path) -> None:
+    """A sparse repair validates the remote in the checkout's config scope."""
+    cache = GitCache(tmp_path / "cache")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    env = {"PATH": os.environ["PATH"]}
+    validated_env = {"VALIDATED": "1"}
+
+    with (
+        patch(
+            "apm_cli.utils.git_env.git_network_env",
+            return_value=validated_env,
+        ) as validate,
+        patch(
+            "apm_cli.cache.git_cache.repair_dangling_cone_symlinks",
+            return_value=None,
+        ) as repair,
+    ):
+        result = cache._finalize_sparse_checkout(
+            "https://git.example.com/acme/repo",
+            checkout,
+            ["skills/acme"],
+            env=env,
+        )
+
+    assert result == checkout
+    validate.assert_called_once_with(
+        "https://git.example.com/acme/repo",
+        env,
+        worktree=checkout,
+    )
+    assert repair.call_args.kwargs["env"] == validated_env
 
 
 def _build_local_bare_repo(tmp_path: Path) -> tuple[Path, str]:

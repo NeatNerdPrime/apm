@@ -7,9 +7,8 @@ single subprocess call.
 
 Security notes
 --------------
-* Tokens embedded in ``https://x-access-token:<TOKEN>@`` URLs are
-  scrubbed from all error messages and exceptions before they leave
-  this module.
+* Managed credentials use process-scoped Authorization headers and stay out of
+  remote URLs. URL sanitization remains as defense for explicit userinfo.
 * The ``translate_git_stderr`` helper from ``git_stderr.py`` is used
   to classify failures and produce actionable hints.
 """
@@ -263,7 +262,6 @@ class RefResolver:
                 summary=f"Bearer authentication is not supported for host '{self._host}'.",
                 hint="Use bearer authentication only with an Azure DevOps host.",
             )
-        url_token = None if requested_bearer or use_ssh else self._token
         if use_ssh and ado_host:
             org, project, repo = _ado_coordinates_from_owner_repo(
                 host=self._host,
@@ -288,13 +286,17 @@ class RefResolver:
                 if ado_host
                 else None
             )
+            expected_path = (
+                expected_ado_path if ado_host else f"/{owner_repo.removesuffix('.git').strip('/')}"
+            )
+            expected_path = expected_path.removesuffix(".git").rstrip("/")
+            actual_path = parsed_remote.path.removesuffix(".git").rstrip("/")
             # urlparse lowercases hostname per RFC 3986 3.2.2; normalize both sides.
             if (
-                not ado_host
-                or parsed_remote.scheme != "https"
+                parsed_remote.scheme != "https"
                 or parsed_remote.hostname != self._host.lower()
                 or parsed_remote.port != self._port
-                or parsed_remote.path != expected_ado_path
+                or actual_path != expected_path
                 or parsed_remote.username is not None
                 or parsed_remote.password is not None
                 or parsed_remote.query
@@ -304,11 +306,10 @@ class RefResolver:
                     package=owner_repo,
                     summary=(
                         "The canonical remote URL does not match the configured host "
-                        "or Azure DevOps dependency coordinates."
+                        "or dependency coordinates."
                     ),
                     hint=(
-                        "Re-add the dependency with the original Azure DevOps URL "
-                        "to regenerate the lock entry."
+                        "Re-add the dependency with its original URL to regenerate the lock entry."
                     ),
                 )
             # ADO HTTPS intentionally keeps credentials out of the URL; auth
@@ -330,7 +331,7 @@ class RefResolver:
             url = build_https_clone_url(
                 self._host,
                 owner_repo,
-                token=url_token,
+                token=None,
                 port=self._port,
             )
         from apm_cli.core.auth import AuthResolver
@@ -404,12 +405,13 @@ class RefResolver:
 
             url, env = self._git_url_and_env(owner_repo, remote_url=remote_url)
             try:
-                result = subprocess.run(
-                    ["git", "ls-remote", "--tags", "--heads", url],
-                    capture_output=True,
-                    text=True,
+                from ..utils.git_env import git_remote_refs
+
+                result = git_remote_refs(
+                    url,
                     timeout=self._timeout,
                     env=env,
+                    options=("--tags", "--heads"),
                 )
             except subprocess.TimeoutExpired:
                 raise GitLsRemoteError(  # noqa: B904
@@ -560,10 +562,11 @@ class RefResolver:
         """
         url, env = self._git_url_and_env(owner_repo)
         try:
-            result = subprocess.run(
-                ["git", "ls-remote", url, ref],
-                capture_output=True,
-                text=True,
+            from ..utils.git_env import git_remote_refs
+
+            result = git_remote_refs(
+                url,
+                ref,
                 timeout=self._timeout,
                 env=env,
             )

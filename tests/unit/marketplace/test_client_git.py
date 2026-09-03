@@ -30,6 +30,7 @@ from apm_cli.marketplace.client import (
 )
 from apm_cli.marketplace.errors import MarketplaceFetchError
 from apm_cli.marketplace.models import MarketplaceSource
+from apm_cli.utils.git_env import GitUrlRewriteError
 
 
 def _git_source(url: str, name: str = "acme", ref: str = "main") -> MarketplaceSource:
@@ -305,11 +306,27 @@ def test_fetch_git_does_not_render_generic_exception_text(
     assert "apm marketplace update acme" in str(raised.value)
 
 
-def test_fetch_git_wraps_https_downgrade_rejection(fake_host_info, fake_auth_resolver) -> None:
+@pytest.mark.parametrize(
+    ("reason", "detail", "expected"),
+    (
+        ("https-downgrade", "HTTPS Git remote must not rewrite to insecure HTTP", "insecure"),
+        ("credentials", "Git URL rewrite replacement must not contain credentials", "credentials"),
+        (
+            "credential-origin",
+            "Authenticated Git remote must not rewrite to a different HTTPS origin",
+            "changes the remote origin",
+        ),
+    ),
+)
+def test_fetch_git_wraps_url_rewrite_rejection(
+    fake_host_info,
+    fake_auth_resolver,
+    reason: str,
+    detail: str,
+    expected: str,
+) -> None:
     """Transport-policy rejection keeps the actionable marketplace error shape."""
-    fake_auth_resolver.git_env_for_remote.side_effect = ValueError(
-        "HTTPS Git remote is configured to rewrite to insecure HTTP"
-    )
+    fake_auth_resolver.git_env_for_remote.side_effect = GitUrlRewriteError(reason, detail)
 
     with pytest.raises(MarketplaceFetchError) as raised:
         _fetch_git(
@@ -320,7 +337,7 @@ def test_fetch_git_wraps_https_downgrade_rejection(fake_host_info, fake_auth_res
         )
 
     message = str(raised.value)
-    assert "HTTPS Git remote was rejected" in message
+    assert expected in message
     assert "apm marketplace update acme" in message
 
 

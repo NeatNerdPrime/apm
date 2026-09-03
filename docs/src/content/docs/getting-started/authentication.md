@@ -26,6 +26,23 @@ If the resolved token fails for the target host, APM retries with git credential
 
 Results are cached per-process. Validation, persistent Git cache population, and later fetch phases for the same private repository reuse one path-scoped fallback instead of prompting repeatedly, while another repository can resolve its own credential. APM never writes the credential into persistent cache keys or stored remote URLs. All token-bearing requests use HTTPS.
 
+### Git URL rewrite safety
+
+APM preserves safe `url.<base>.insteadOf` rules, including HTTPS-to-SSH and
+local mirror rewrites. Before any dependency network operation, it rejects a
+matching rewrite that embeds credentials, moves HTTPS to HTTP, `git://`, or
+`ext::`, or redirects an authenticated HTTPS request to another origin. This
+prevents a rewrite from carrying a resolved token to a different endpoint.
+
+If a rewrite is rejected, find its source and remove or replace it:
+
+```bash
+git config --show-origin --get-regexp '^url\..*\.insteadOf$'
+```
+
+APM evaluates clone rewrites without the invoking repository's local
+`.git/config`, because `git clone` does not consume that local config.
+
 ## Token lookup
 ### GitHub-class hosts (`github.com`, `*.ghe.com`, GHES via `GITHUB_HOST`)
 
@@ -615,7 +632,8 @@ See [apm config](../../reference/cli/config/) for the full transport-preference 
 Authentication and transport are independent decisions:
 
 - **HTTPS** uses the token resolution chain documented above. APM resolves a
-  token per `(host, org)` and embeds it in the clone URL.
+  token per `(host, org)` and sends managed GitHub, GitLab, and Azure DevOps
+  credentials through a process-scoped Authorization header, never URL userinfo.
 - **SSH** uses your existing ssh-agent and `~/.ssh/config`. APM does not
   select keys or override agent behavior -- whatever `git clone` would do
   on the same machine, APM does.

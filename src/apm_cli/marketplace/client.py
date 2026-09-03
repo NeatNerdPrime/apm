@@ -582,15 +582,26 @@ def _fetch_git(
         )
         git_env = auth_resolver.git_env_for_remote(auth_ctx, source.url)
     except ValueError as exc:
+        from ..utils.git_env import GitUrlRewriteError
+
         logger.debug(
             "Generic-git policy rejected '%s': %s",
             source.name,
             type(exc).__name__,
         )
+        reasons = {
+            "credentials": "Git URL rewrite contains credentials",
+            "credential-origin": "authenticated Git URL rewrite changes the remote origin",
+            "https-downgrade": (
+                "HTTPS Git remote was rejected because Git configuration "
+                "rewrites it to insecure HTTP"
+            ),
+            "insecure-transport": "HTTPS Git URL rewrite selects an insecure transport",
+        }
         reason = (
-            "HTTPS Git remote was rejected because Git configuration rewrites it to insecure HTTP"
-            if str(exc) == "HTTPS Git remote is configured to rewrite to insecure HTTP"
-            else "unable to verify HTTPS Git rewrite safety"
+            reasons.get(exc.reason, "unsafe Git URL rewrite")
+            if isinstance(exc, GitUrlRewriteError)
+            else "unable to verify Git URL rewrite safety"
         )
         raise MarketplaceFetchError(
             source.name,
@@ -911,14 +922,13 @@ def _fetch_local_via_git_show(
     source: MarketplaceSource, file_path: str, git_dir: Path
 ) -> dict | None:
     """Use ``git show <ref>:<file>`` against a bare repo or .git directory."""
-    from ..utils.git_env import git_subprocess_env
+    from ..utils.git_env import get_git_executable, git_no_hooks_args, git_subprocess_env
 
     cmd = [
-        "git",
+        get_git_executable(),
         "--git-dir",
         str(git_dir),
-        "-c",
-        "core.hooksPath=/dev/null",
+        *git_no_hooks_args(),
         "show",
         f"{source.ref}:{file_path}",
     ]

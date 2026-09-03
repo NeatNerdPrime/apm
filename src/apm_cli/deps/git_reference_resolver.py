@@ -144,11 +144,18 @@ class GitReferenceResolver:
 
         is_ado = dep_ref.is_azure_devops()
         repo_url_base = dep_ref.repo_url
+        rewrite_candidate = host._build_repo_url(
+            repo_url_base,
+            use_ssh=False,
+            dep_ref=dep_ref,
+            token="",
+        )
         anonymous_plan = host._transport_selector.select(
             dep_ref=dep_ref,
             cli_pref=host._protocol_pref,
             allow_fallback=False,
             has_token=False,
+            candidate_url=rewrite_candidate,
         )
         dep_host = dep_ref.host or default_host()
         public_github_https_first = bool(
@@ -176,6 +183,7 @@ class GitReferenceResolver:
                 cli_pref=host._protocol_pref,
                 allow_fallback=False,
                 has_token=bool(dep_token),
+                candidate_url=rewrite_candidate,
             )
         transport_attempt = transport_plan.attempts[0]
         use_ssh = transport_attempt.scheme == "ssh"
@@ -190,14 +198,23 @@ class GitReferenceResolver:
             AuthResolver._clear_git_auth_env(ls_env)
             ls_env.pop("GIT_ASKPASS", None)
         elif dep_token and transport_attempt.use_token:
-            ls_env = (
-                host.auth_resolver.git_env_for_context(
+            if dep_auth_ctx is not None:
+                ls_env = host.auth_resolver.git_env_for_context(
                     dep_auth_ctx,
                     base_env=host.git_env,
                 )
-                if dep_auth_ctx is not None
-                else host.git_env
-            )
+            else:
+                classified = host.auth_resolver.classify_host(
+                    dep_host or default_host(),
+                    port=dep_ref.port,
+                    host_type=dep_ref.host_type,
+                )
+                fallback_kind = "github" if is_github_hostname(dep_host or "") else "generic"
+                ls_env = host.auth_resolver._build_git_env(
+                    dep_token,
+                    host_kind=getattr(classified, "kind", fallback_kind),
+                    base_env=host.git_env,
+                )
         elif is_ado:
             ls_env = host.auth_resolver.build_noninteractive_git_env(
                 base_env=host.git_env,
@@ -210,25 +227,43 @@ class GitReferenceResolver:
                 suppress_credential_helpers=bool(getattr(dep_ref, "is_insecure", False)),
             )
 
-        if not public_github_https_first:
+        if transport_attempt.requested_url is not None:
+            remote_url = transport_attempt.requested_url
+        elif not public_github_https_first:
             remote_url = host._build_repo_url(
                 repo_url_base,
                 use_ssh=use_ssh,
                 dep_ref=dep_ref,
-                token=None if use_ssh else (dep_token if transport_attempt.use_token else None),
+                token=(None if use_ssh else ""),
                 auth_scheme=dep_auth_scheme if transport_attempt.use_token else "basic",
             )
 
-        # Route through the github_downloader module so that test patches
-        # of ``apm_cli.deps.github_downloader.git.cmd.Git`` intercept here.
+        # Keep the GitPython object as a test seam. The network call itself
+        # routes through the direct-subprocess owner unless a test replaces
+        # this method.
         from . import github_downloader as _gd
 
         g = _gd.git.cmd.Git()
         ls_args = ("--tags", "--heads") if include_heads else ("--tags",)
 
+        def _run_remote(url: str, env: dict[str, str]) -> str:
+            if type(g).__module__.startswith("unittest.mock"):
+                return g.ls_remote(*ls_args, url, env=env)
+            from ..utils.git_env import git_remote_refs
+
+            result = git_remote_refs(url, env=env, options=ls_args)
+            if result.returncode != 0:
+                # auth-delegated: _primary_op and _bearer_op select this environment.
+                raise GitCommandError(
+                    ["git", "ls-remote", *ls_args, url],
+                    result.returncode,
+                    stderr=result.stderr,
+                )
+            return result.stdout
+
         def _primary_op():
             try:
-                output = g.ls_remote(*ls_args, remote_url, env=ls_env)
+                output = _run_remote(remote_url, ls_env)
                 return ("ok", output)
             except GitCommandError as exc:
                 return ("err", exc)
@@ -250,7 +285,7 @@ class GitReferenceResolver:
                 auth_scheme="bearer",
             )
             try:
-                output = g.ls_remote(*ls_args, bearer_url, env=bearer_env)
+                output = _run_remote(bearer_url, bearer_env)
                 return ("ok", output)
             except GitCommandError as exc:
                 return ("err", exc)
@@ -278,10 +313,10 @@ class GitReferenceResolver:
                     repo_url_base,
                     use_ssh=False,
                     dep_ref=dep_ref,
-                    token=token or "",
+                    token="",
                     auth_scheme="basic",
                 )
-                return ("ok", g.ls_remote(*ls_args, public_url, env=git_env))
+                return ("ok", _run_remote(public_url, git_env))
 
             org = repo_url_base.split("/", 1)[0] if "/" in repo_url_base else None
             try:

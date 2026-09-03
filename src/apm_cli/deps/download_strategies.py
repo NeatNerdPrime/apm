@@ -792,12 +792,27 @@ class DownloadDelegate:
         with self._git_file_transports_lock:
             transport = self._git_file_transports.get(key)
             if transport is None:
-                git_env = {**os.environ, **(self._host.git_env or {})}
+                auth_ctx = self._host.auth_resolver.resolve_for_dep(dep_ref)
+                git_env = (
+                    self._host.auth_resolver.git_env_for_context(
+                        auth_ctx,
+                        base_env=self._host.git_env or {},
+                    )
+                    if auth_ctx is not None
+                    else dict(self._host.git_env or {})
+                )
+                from functools import partial
+
+                tokenless_url_builder = partial(
+                    self.build_repo_url,
+                    token="",
+                    auth_scheme=auth_ctx.auth_scheme if auth_ctx is not None else "basic",
+                )
                 transport_factory = self._git_file_transport_factory or GitSparseFileTransport
                 transport = transport_factory(
                     dep_ref,
                     ref,
-                    build_repo_url_fn=self.build_repo_url,
+                    build_repo_url_fn=tokenless_url_builder,
                     git_env=git_env,
                 )
                 self._git_file_transports[key] = transport

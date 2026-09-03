@@ -2,9 +2,20 @@
 
 ## Token precedence chain
 
-For public `github.com` HTTPS repositories, APM makes one anonymous attempt before checking any token source. The attempt removes GitHub token variables, overrides authorization headers and credential helpers with empty values, and preserves caller-supplied global/system Git config such as CA settings, URL rewrites, and `credential.interactive=never`.
+For public `github.com` HTTPS repositories, APM makes one anonymous attempt before checking any token source. The attempt removes GitHub token variables, overrides authorization headers and credential helpers with empty values, and preserves caller-supplied global/system Git config such as CA settings, safe URL rewrites, and `credential.interactive=never`.
 
 Only HTTP 401, 403, 404, or an equivalent Git authentication failure unlocks the fallback chain below. DNS, TLS, timeout, and GitHub throttle failures do not prompt for credentials. Private-repository fallback is cached per repository path for the process, so persistent Git cache population and later phases reuse it without applying that credential to a different repository. APM never writes the credential into persistent cache keys or stored remote URLs.
+
+Managed GitHub, GitLab, and Azure DevOps credentials use process-scoped
+Authorization headers. They are never embedded in Git URL userinfo.
+
+Before a dependency network operation, APM rejects a matching Git URL rewrite
+that embeds credentials, moves HTTPS to HTTP, `git://`, or `ext::`, or redirects
+an authenticated HTTPS request to another origin. Inspect rejected rules with:
+
+```bash
+git config --show-origin --get-regexp '^url\..*\.insteadOf$'
+```
 
 When fallback is required, APM checks these sources in order:
 

@@ -10,7 +10,7 @@ Preserved variables (user-controlled config for proxy/auth):
 - GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM
 
 Git state variables stripped after external-process sanitization:
-- GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE
+- GIT_DIR, GIT_CONFIG, GIT_WORK_TREE, GIT_INDEX_FILE
 - GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES
 - GIT_COMMON_DIR, GIT_NAMESPACE, GIT_INDEX_VERSION
 - GIT_CEILING_DIRECTORIES, GIT_DISCOVERY_ACROSS_FILESYSTEM
@@ -26,12 +26,17 @@ import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from apm_cli.utils.subprocess_env import external_process_env
 
 # Module-level cached git executable path (successful resolutions only).
 _git_executable: str | None = None
+# Keep config inspection independent from tests that replace network subprocess
+# execution. Targeted tests can patch this callable directly when exercising
+# malformed config output.
+_git_config_run = subprocess.run
+_git_init_run = subprocess.run
 
 # Variables that represent ambient git state -- strip these to avoid
 # biasing APM's git operations when invoked from within another repo
@@ -40,6 +45,7 @@ _git_executable: str | None = None
 _STRIP_GIT_VARS: frozenset[str] = frozenset(
     {
         "GIT_DIR",
+        "GIT_CONFIG",
         "GIT_WORK_TREE",
         "GIT_INDEX_FILE",
         "GIT_OBJECT_DIRECTORY",
@@ -57,6 +63,21 @@ _STRIP_GIT_VARS: frozenset[str] = frozenset(
         "GIT_PREFIX",
     }
 )
+
+_URL_REWRITE_RECOVERY = (
+    "inspect matching rules with "
+    "'git config --show-origin --get-regexp ^url\\..*\\.insteadOf$' "
+    "and remove the unsafe rule"
+)
+
+
+class GitUrlRewriteError(ValueError):
+    """A stable, actionable rejection of an unsafe Git URL rewrite."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        """Initialize one rejection with a machine-readable reason."""
+        self.reason = reason
+        super().__init__(f"{message}; {_URL_REWRITE_RECOVERY}")
 
 
 def get_git_executable() -> str:
@@ -120,6 +141,11 @@ def git_subprocess_error_text(exc: BaseException) -> str:
     return str(exc)
 
 
+def git_no_hooks_args() -> tuple[str, str]:
+    """Return the canonical per-command fence against repository Git hooks."""
+    return "-c", "core.hooksPath=/dev/null"
+
+
 class _GitProgress(Protocol):
     """Git progress callback consumed by the clone subprocess adapter."""
 
@@ -127,30 +153,54 @@ class _GitProgress(Protocol):
         """Return a callback that parses one Git progress line."""
 
 
-def _read_effective_git_url_rewrites(env: dict[str, str]) -> tuple[tuple[str, str], ...]:
-    """Return every URL rewrite visible to a Git child using *env*."""
+def _read_effective_git_url_rewrites(
+    env: dict[str, str],
+    *,
+    git_dir: Path | None = None,
+    worktree: Path | None = None,
+) -> tuple[tuple[tuple[str, str], ...], bool]:
+    """Return visible URL rewrites and whether config injects authorization."""
+    if git_dir is not None and worktree is not None:
+        raise ValueError("git_dir and worktree are mutually exclusive")
+    command = [get_git_executable()]
+    probe_env = dict(env)
+    probe_cwd: str | None = None
+    if git_dir is not None:
+        command.extend(("--git-dir", str(git_dir)))
+    elif worktree is not None:
+        command.extend(("-C", str(worktree)))
+    else:
+        # `git clone <url>` does not consume the invoking repository's local
+        # config. Run from the Git executable's directory so a hook's cwd cannot
+        # create false policy failures while system, global, and process-scoped
+        # config remain visible.
+        probe_cwd = str(Path(get_git_executable()).resolve().parent)
+    command.extend(
+        (
+            "config",
+            "--null",
+            "--get-regexp",
+            r"^(url\..*\.insteadof|http(\..*)?\.extraheader)$",
+        )
+    )
     try:
-        result = subprocess.run(
-            (
-                get_git_executable(),
-                "config",
-                "--null",
-                "--get-regexp",
-                r"^url\..*\.insteadOf$",
-            ),
+        result = _git_config_run(
+            command,
             capture_output=True,
             check=False,
-            env=env,
+            cwd=probe_cwd,
+            env=probe_env,
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("Unable to verify Git URL rewrite safety") from exc
     if result.returncode == 1:
-        return ()
+        return (), False
     if result.returncode != 0 or not isinstance(result.stdout, bytes):
         raise ValueError("Unable to verify Git URL rewrite safety")
 
     rewrites: list[tuple[str, str]] = []
+    has_authorization = False
     for entry in result.stdout.split(b"\0"):
         if not entry:
             continue
@@ -163,65 +213,177 @@ def _read_effective_git_url_rewrites(env: dict[str, str]) -> tuple[tuple[str, st
         except UnicodeDecodeError as exc:
             raise ValueError("Unable to verify Git URL rewrite safety") from exc
         normalized = key_text.lower()
+        if normalized.startswith("http.") or normalized == "http.extraheader":
+            if normalized.endswith(".extraheader") and prefix_text.strip():
+                has_authorization = True
+            continue
         if not normalized.startswith("url.") or not normalized.endswith(".insteadof"):
             raise ValueError("Unable to verify Git URL rewrite safety")
         replacement = key_text[4 : -len(".insteadOf")]
         if not replacement or not prefix_text:
             raise ValueError("Unable to verify Git URL rewrite safety")
         rewrites.append((replacement, prefix_text))
-    return tuple(rewrites)
+    return tuple(rewrites), has_authorization
 
 
-def validate_git_url_rewrite_safety(remote_url: str, env: dict[str, str]) -> None:
-    """Reject credential-bearing or HTTPS-downgrading effective URL rewrites."""
+def _has_forced_http_authorization(env: dict[str, str]) -> bool:
+    """Return whether *env* injects an HTTP authorization header."""
+    normalized_env = {key.upper(): value for key, value in env.items()}
+    if normalized_env.get("GIT_HTTP_EXTRAHEADER", "").strip():
+        return True
+    parameters = normalized_env.get("GIT_CONFIG_PARAMETERS", "").lower()
+    if "extraheader" in parameters:
+        return True
+    try:
+        count = max(0, int(normalized_env.get("GIT_CONFIG_COUNT", "0") or "0"))
+    except ValueError:
+        return True
+    for index in range(count):
+        key = normalized_env.get(f"GIT_CONFIG_KEY_{index}", "").lower()
+        value = normalized_env.get(f"GIT_CONFIG_VALUE_{index}", "")
+        if key.endswith("extraheader") and value.strip():
+            return True
+    return False
+
+
+def _url_origin(url: str) -> tuple[str, str, int | None]:
+    """Return a normalized HTTP(S) origin tuple."""
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    port = parsed.port
+    if port is None:
+        port = {"http": 80, "https": 443}.get(scheme)
+    return scheme, (parsed.hostname or "").lower(), port
+
+
+def _url_contains_credentials(parsed: SplitResult) -> bool:
+    """Return whether URL userinfo can carry a credential."""
+    return parsed.password is not None or (
+        parsed.scheme.lower() in {"http", "https", "file"} and parsed.username is not None
+    )
+
+
+def resolve_git_url_rewrite(
+    remote_url: str,
+    rewrites: Sequence[tuple[str, str]],
+) -> str | None:
+    """Apply Git's longest-prefix ``insteadOf`` rule to *remote_url*."""
+    matches = tuple(
+        (replacement, prefix) for replacement, prefix in rewrites if remote_url.startswith(prefix)
+    )
+    if not matches:
+        return None
+    replacement, prefix = max(matches, key=lambda item: len(item[1]))
+    return f"{replacement}{remote_url[len(prefix) :]}"
+
+
+def configured_git_url_policy(
+    env: dict[str, object] | None = None,
+) -> tuple[tuple[tuple[str, str], ...], bool]:
+    """Return repository-neutral rewrites and config authorization state."""
+    return _read_effective_git_url_rewrites(git_subprocess_env(env))
+
+
+def validate_resolved_git_url_rewrite(
+    remote_url: str,
+    effective_url: str,
+    *,
+    has_authorization: bool,
+) -> None:
+    """Validate one effective URL selected by Git's rewrite rules."""
     try:
         source = urlsplit(remote_url)
-        rewrites = _read_effective_git_url_rewrites(env)
+        target = urlsplit(effective_url)
+        source_origin = _url_origin(remote_url)
+        target_origin = _url_origin(effective_url)
+    except ValueError as exc:
+        raise ValueError("Unable to verify Git URL rewrite safety") from exc
+    if _url_contains_credentials(target):
+        raise GitUrlRewriteError(
+            "credentials",
+            "Git URL rewrite replacement must not contain credentials",
+        )
+    source_scheme = source.scheme.lower()
+    target_scheme = target.scheme.lower()
+    if target_scheme == "http" and source_scheme != "http":
+        raise GitUrlRewriteError(
+            "https-downgrade" if source_scheme == "https" else "insecure-transport",
+            (
+                "HTTPS Git remote must not rewrite to insecure HTTP"
+                if source_scheme == "https"
+                else "Git remote must not rewrite to insecure HTTP"
+            ),
+        )
+    if target_scheme not in {
+        "",
+        "file",
+        "https",
+        "ssh",
+    }:
+        raise GitUrlRewriteError(
+            "insecure-transport",
+            "HTTPS Git remote must not rewrite to an insecure transport",
+        )
+    if _url_contains_credentials(source):
+        raise GitUrlRewriteError(
+            "credential-origin",
+            "Credential-bearing Git remote must not be rewritten",
+        )
+    if target_scheme in {"http", "https"} and has_authorization and source_origin != target_origin:
+        raise GitUrlRewriteError(
+            "credential-origin",
+            f"Authenticated Git remote must not rewrite to a different "
+            f"{target_scheme.upper()} origin",
+        )
+
+
+def validate_git_url_rewrite_safety(
+    remote_url: str,
+    env: dict[str, str],
+    *,
+    git_dir: Path | None = None,
+    worktree: Path | None = None,
+) -> str | None:
+    """Reject credential-bearing or HTTPS-downgrading effective URL rewrites."""
+    try:
+        rewrites, config_has_authorization = _read_effective_git_url_rewrites(
+            env,
+            git_dir=git_dir,
+            worktree=worktree,
+        )
     except ValueError as exc:
         if str(exc) == "Unable to verify Git URL rewrite safety":
             raise
         raise ValueError("Unable to verify Git URL rewrite safety") from exc
 
-    for replacement, prefix in rewrites:
-        if not remote_url.startswith(prefix):
-            continue
-        try:
-            target = urlsplit(replacement)
-        except ValueError as exc:
-            raise ValueError("Unable to verify Git URL rewrite safety") from exc
-        if target.scheme.lower() in {"http", "https"} and (
-            target.username is not None or target.password is not None
-        ):
-            raise ValueError("Git URL rewrite replacement must not contain credentials")
-        if source.scheme.lower() == "https" and target.scheme.lower() == "http":
-            raise ValueError("HTTPS Git remote must not rewrite to insecure HTTP")
+    effective_url = resolve_git_url_rewrite(remote_url, rewrites)
+    if effective_url is None:
+        return None
+    validate_resolved_git_url_rewrite(
+        remote_url,
+        effective_url,
+        has_authorization=config_has_authorization or _has_forced_http_authorization(env),
+    )
+    return effective_url
 
 
-def _append_parent_git_config(env: dict[str, str]) -> None:
-    """Retain parent config selection and URL rewrites, never auth channels."""
-    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
-        if name not in env and name in os.environ:
-            env[name] = os.environ[name]
+def _append_git_url_rewrites(
+    env: dict[str, str],
+    rewrites: Sequence[tuple[str, str]],
+) -> None:
+    """Materialize URL rewrites in indexed process configuration."""
     try:
-        parent_count = max(0, int(os.environ.get("GIT_CONFIG_COUNT", "0") or "0"))
         target_count = max(0, int(env.get("GIT_CONFIG_COUNT", "0") or "0"))
     except ValueError:
-        return
+        raise ValueError("Unable to verify Git URL rewrite safety") from None
 
     existing = {
         (env.get(f"GIT_CONFIG_KEY_{index}", ""), env.get(f"GIT_CONFIG_VALUE_{index}", ""))
         for index in range(target_count)
     }
-    for index in range(parent_count):
-        key = os.environ.get(f"GIT_CONFIG_KEY_{index}", "")
-        value = os.environ.get(f"GIT_CONFIG_VALUE_{index}", "")
-        normalized = key.lower()
-        if not (
-            normalized.startswith("url.")
-            and normalized.endswith(".insteadof")
-            and value
-            and (key, value) not in existing
-        ):
+    for replacement, value in rewrites:
+        key = f"url.{replacement}.insteadOf"
+        if (key, value) in existing:
             continue
         env[f"GIT_CONFIG_KEY_{target_count}"] = key
         env[f"GIT_CONFIG_VALUE_{target_count}"] = value
@@ -229,6 +391,176 @@ def _append_parent_git_config(env: dict[str, str]) -> None:
         existing.add((key, value))
     if target_count:
         env["GIT_CONFIG_COUNT"] = str(target_count)
+
+
+def _append_parent_git_config(env: dict[str, str]) -> None:
+    """Retain parent URL rewrites without restoring config auth channels."""
+    try:
+        parent_rewrites, _ = _read_effective_git_url_rewrites(git_subprocess_env())
+    except ValueError:
+        raise ValueError("Unable to verify Git URL rewrite safety") from None
+    _append_git_url_rewrites(env, parent_rewrites)
+
+
+def git_network_env(
+    remote_url: str,
+    overrides: dict[str, object] | None = None,
+    *,
+    git_dir: Path | None = None,
+    worktree: Path | None = None,
+) -> dict[str, str]:
+    """Return the canonical validated environment for one network Git URL."""
+    env = git_subprocess_env(overrides)
+    if overrides is not None:
+        _append_parent_git_config(env)
+    effective_url = validate_git_url_rewrite_safety(
+        remote_url,
+        env,
+        git_dir=git_dir,
+        worktree=worktree,
+    )
+    transport_url = effective_url or remote_url
+    if urlsplit(transport_url).scheme.lower() not in {"http", "https"}:
+        from apm_cli.core.auth import AuthResolver
+
+        rewrites, _ = _read_effective_git_url_rewrites(
+            env,
+            git_dir=git_dir,
+            worktree=worktree,
+        )
+        AuthResolver._clear_git_auth_env(env)
+        AuthResolver._clear_platform_token_env(env, remove=True)
+        _append_git_url_rewrites(env, rewrites)
+    return env
+
+
+def git_clone_env(
+    remote_url: str,
+    overrides: dict[str, object] | None,
+    target: Path,
+    *,
+    bare: bool = False,
+) -> dict[str, str]:
+    """Validate clone config in the Git directory the target will activate."""
+    target_existed = target.exists()
+    git_dir = target if bare else target / ".git"
+    probe_created = not (git_dir / "config").exists()
+    target_mode = target.stat().st_mode if target_existed else None
+    probe_materialized = False
+    try:
+        if probe_created:
+            if target_existed and any(target.iterdir()):
+                raise ValueError(f"Git clone target is not empty: {target}")
+            probe_materialized = True
+            result = _git_init_run(
+                [
+                    get_git_executable(),
+                    "init",
+                    *(("--bare",) if bare else ()),
+                    "--template=",
+                    "--quiet",
+                    str(target),
+                ],
+                capture_output=True,
+                check=False,
+                env=git_subprocess_env(overrides),
+                timeout=30,
+            )
+            if result.returncode != 0:
+                raise ValueError("Unable to prepare Git clone configuration probe")
+        return git_network_env(remote_url, overrides, git_dir=git_dir)
+    finally:
+        if probe_materialized:
+            if bare:
+                if target.exists():
+                    shutil.rmtree(target)
+                if target_existed:
+                    target.mkdir()
+                    if target_mode is not None:
+                        os.chmod(target, target_mode)
+            else:
+                if git_dir.exists():
+                    shutil.rmtree(git_dir)
+                if not target_existed and target.exists():
+                    target.rmdir()
+
+
+def git_remote_refs(
+    remote_url: str,
+    *patterns: str,
+    env: dict[str, object] | None = None,
+    timeout: int = 30,
+    check: bool = False,
+    options: Sequence[str] = (),
+    git_args: Sequence[str] = (),
+) -> subprocess.CompletedProcess[str]:
+    """Run ``git ls-remote`` with the canonical validated child environment."""
+    child_env = git_network_env(remote_url, env)
+    # auth-delegated: callers resolve credential and bearer policy before this executor.
+    git_executable = get_git_executable()
+    command = [git_executable, *git_args, "ls-remote", *options, remote_url, *patterns]
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            cwd=str(Path(git_executable).resolve().parent),
+            text=True,
+            timeout=timeout,
+            env=child_env,
+            stdin=subprocess.DEVNULL,
+            check=check,
+        )
+    except subprocess.TimeoutExpired:
+        # auth-delegated: callers resolve credential and bearer policy before this executor.
+        raise subprocess.TimeoutExpired([git_executable, "ls-remote"], timeout) from None
+
+
+def init_git_remote_worktree(
+    worktree: Path,
+    remote_url: str,
+    env: dict[str, object],
+    *,
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> dict[str, str]:
+    """Initialize a worktree and add one validated network remote."""
+    git_executable = get_git_executable()
+    child_env = git_subprocess_env(env)
+    result = run(
+        [git_executable, "init"],
+        cwd=str(worktree),
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+        check=True,
+    )
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            result.args,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    child_env = git_network_env(remote_url, child_env, worktree=worktree)
+    result = run(
+        [git_executable, "remote", "add", "origin", remote_url],
+        cwd=str(worktree),
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+        check=True,
+    )
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            result.args,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return child_env
 
 
 def clone_git_worktree(
@@ -243,7 +575,9 @@ def clone_git_worktree(
     progress: _GitProgress | None = None,
 ) -> None:
     """Clone a working tree with a complete sanitized child environment."""
-    args = [get_git_executable(), "clone"]
+    args = [get_git_executable(), *git_no_hooks_args(), "clone"]
+    if progress is not None:
+        args.append("--progress")
     if depth is not None:
         args.extend(("--depth", str(depth)))
     if branch is not None:
@@ -252,19 +586,19 @@ def clone_git_worktree(
         args.append("--no-checkout")
     args.extend(extra_options)
     args.extend(("--", url, str(target)))
-    clone_env = git_subprocess_env(env)
-    if env is not None:
-        _append_parent_git_config(clone_env)
-    validate_git_url_rewrite_safety(url, clone_env)
+    clone_env = git_clone_env(url, env, target)
     if progress is None:
-        subprocess.run(
-            args,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=clone_env,
-        )
+        try:
+            subprocess.run(
+                args,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=clone_env,
+            )
+        except subprocess.TimeoutExpired:
+            raise subprocess.TimeoutExpired([get_git_executable(), "clone"], 300) from None
         return
 
     from git.cmd import handle_process_output
@@ -296,7 +630,7 @@ def clone_git_worktree(
     except (RuntimeError, subprocess.TimeoutExpired):
         process.kill()
         process.wait()
-        raise subprocess.TimeoutExpired(args, 300) from None
+        raise subprocess.TimeoutExpired([get_git_executable(), "clone"], 300) from None
     if process.returncode != 0:
         raise subprocess.CalledProcessError(
             process.returncode,
@@ -316,8 +650,7 @@ def checkout_git_worktree(
     subprocess.run(
         [
             get_git_executable(),
-            "-c",
-            "core.hooksPath=/dev/null",
+            *git_no_hooks_args(),
             "-C",
             str(worktree),
             "checkout",

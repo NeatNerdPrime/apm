@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlsplit
 
@@ -10,8 +11,10 @@ import pytest
 
 from apm_cli.utils.git_env import (
     _STRIP_GIT_VARS,
+    GitUrlRewriteError,
     clone_git_worktree,
     get_git_executable,
+    git_remote_refs,
     git_subprocess_env,
     git_subprocess_error_text,
     reset_git_cache,
@@ -214,7 +217,7 @@ class TestGitSubprocessEnv:
         assert "GITHUB_TOKEN" not in child
         assert "GIT_HTTP_EXTRAHEADER" not in child
         assert "GIT_CONFIG_PARAMETERS" not in child
-        assert child["GIT_CONFIG_GLOBAL"] == str(config)
+        assert "GIT_CONFIG_GLOBAL" not in child
         assert child["GIT_CONFIG_COUNT"] == "2"
         assert child["GIT_CONFIG_KEY_1"] == "url.file:///fixture/.insteadOf"
         assert child["GIT_CONFIG_VALUE_1"] == "https://git.example.com/acme/repo"
@@ -248,7 +251,7 @@ class TestGitSubprocessEnv:
                 tmp_path / "clone",
                 env={"PATH": os.environ.get("PATH", "")},
             )
-        assert all(call.args[0][1] == "config" for call in run.call_args_list)
+        run.assert_not_called()
 
     @pytest.mark.parametrize("source", ("inherited", "existing"))
     @pytest.mark.parametrize(
@@ -287,7 +290,417 @@ class TestGitSubprocessEnv:
                 env=supplied,
             )
 
-        assert all(call.args[0][1] == "config" for call in run.call_args_list)
+        run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("replacement", "message"),
+        (
+            ("https://token@example.com/repo", "must not contain credentials"),
+            ("http://example.com/repo", "must not rewrite to insecure HTTP"),
+        ),
+    )
+    def test_clone_rejects_unsafe_url_rewrite_after_safe_index(
+        self,
+        tmp_path,
+        replacement: str,
+        message: str,
+    ) -> None:
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "url.file:///safe/.insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://unrelated.example/repo",
+            "GIT_CONFIG_KEY_1": f"url.{replacement}.insteadOf",
+            "GIT_CONFIG_VALUE_1": "https://git.example.com/acme/repo",
+        }
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ) as run,
+            pytest.raises(GitUrlRewriteError, match=message),
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+        run.assert_not_called()
+
+    def test_clone_rejects_authenticated_cross_origin_https_rewrite(self, tmp_path) -> None:
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "http.extraheader",
+            "GIT_CONFIG_VALUE_0": "Authorization: Basic sentinel",
+            "GIT_CONFIG_KEY_1": "url.https://mirror.example/repo.insteadOf",
+            "GIT_CONFIG_VALUE_1": "https://git.example.com/acme/repo",
+        }
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ),
+            pytest.raises(GitUrlRewriteError, match="different HTTPS origin"),
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+    def test_clone_rejects_cross_origin_rewrite_with_config_credential_header(
+        self,
+        tmp_path,
+    ) -> None:
+        config = tmp_path / "gitconfig"
+        config.write_text(
+            '[url "https://mirror.example/"]\n'
+            "\tinsteadOf = https://git.example.com/\n"
+            "[http]\n"
+            "\textraHeader = Cookie: session=sentinel\n",
+            encoding="ascii",
+        )
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_GLOBAL": str(config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ),
+            pytest.raises(GitUrlRewriteError, match="different HTTPS origin"),
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+    def test_clone_rejects_rewrite_of_credential_bearing_remote(self, tmp_path) -> None:
+        token = "source-token-sentinel"
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "url.ssh://git@mirror.example/.insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://",
+        }
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ),
+            pytest.raises(GitUrlRewriteError) as raised,
+        ):
+            clone_git_worktree(
+                f"https://{token}@git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+        assert token not in str(raised.value)
+
+    def test_clone_allows_ssh_username_rewritten_to_file(self, tmp_path) -> None:
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "url.file:///fixture/.insteadOf",
+            "GIT_CONFIG_VALUE_0": "ssh://git@git.example.com/",
+        }
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ) as run,
+        ):
+            clone_git_worktree(
+                "ssh://git@git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+        assert "clone" in run.call_args_list[-1].args[0]
+
+    def test_clone_rejects_ssh_password_in_rewritten_remote(self, tmp_path) -> None:
+        secret = "ssh-password-sentinel"
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "url.file:///fixture/.insteadOf",
+            "GIT_CONFIG_VALUE_0": "ssh://",
+        }
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ),
+            pytest.raises(GitUrlRewriteError) as raised,
+        ):
+            clone_git_worktree(
+                f"ssh://git:{secret}@git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+        assert secret not in str(raised.value)
+
+    def test_clone_rejects_authorized_ssh_to_https_rewrite(self, tmp_path) -> None:
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "http.extraheader",
+            "GIT_CONFIG_VALUE_0": "Authorization: Basic sentinel",
+            "GIT_CONFIG_KEY_1": "url.https://mirror.example/.insteadOf",
+            "GIT_CONFIG_VALUE_1": "ssh://git@git.example.com/",
+        }
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ),
+            pytest.raises(GitUrlRewriteError, match="different HTTPS origin"),
+        ):
+            clone_git_worktree(
+                "ssh://git@git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+    def test_clone_rejects_ssh_remote_rewritten_to_http(self, tmp_path) -> None:
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "http.extraheader",
+            "GIT_CONFIG_VALUE_0": "Authorization: Basic sentinel",
+            "GIT_CONFIG_KEY_1": "url.http://mirror.example/.insteadOf",
+            "GIT_CONFIG_VALUE_1": "git@git.example.com:",
+        }
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ),
+            pytest.raises(GitUrlRewriteError, match="insecure HTTP"),
+        ):
+            clone_git_worktree(
+                "git@git.example.com:acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+    @pytest.mark.parametrize(
+        "replacement",
+        (
+            "git",
+            "ext::helper",
+        ),
+    )
+    @pytest.mark.parametrize("source_scheme", ("https", "http"))
+    def test_clone_rejects_effective_insecure_transport_rewrite(
+        self,
+        tmp_path,
+        replacement: str,
+        source_scheme: str,
+    ) -> None:
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": f"url.{replacement}.insteadOf",
+            "GIT_CONFIG_VALUE_0": source_scheme,
+        }
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ),
+            pytest.raises(GitUrlRewriteError, match="insecure transport"),
+        ):
+            clone_git_worktree(
+                f"{source_scheme}://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+    def test_clone_uses_longest_matching_url_rewrite(self, tmp_path) -> None:
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "url.http://bad.example/.insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://git.example.com/",
+            "GIT_CONFIG_KEY_1": "url.file:///fixture/.insteadOf",
+            "GIT_CONFIG_VALUE_1": "https://git.example.com/acme/",
+        }
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ) as run,
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+        clone_args = run.call_args_list[-1].args[0]
+        assert "clone" in clone_args
+        assert "core.hooksPath=/dev/null" in clone_args
+
+    def test_clone_ignores_invoking_repository_local_url_rewrite(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        invoking = tmp_path / "invoking"
+        invoking.mkdir()
+        _REAL_SUBPROCESS_RUN(
+            ["git", "-C", str(invoking), "init"],
+            check=True,
+            capture_output=True,
+        )
+        _REAL_SUBPROCESS_RUN(
+            [
+                "git",
+                "-C",
+                str(invoking),
+                "config",
+                "url.http://example.com/.insteadOf",
+                "https://git.example.com/",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        config = tmp_path / "global-gitconfig"
+        config.write_text("", encoding="ascii")
+        monkeypatch.chdir(invoking)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PATH": os.environ["PATH"],
+                    "GIT_CONFIG_GLOBAL": str(config),
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                },
+                clear=True,
+            ),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ) as run,
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+            )
+
+        clone_args = run.call_args_list[-1].args[0]
+        assert "clone" in clone_args
+        assert "core.hooksPath=/dev/null" in clone_args
+
+    def test_clone_rejects_target_activated_include_rewrite(
+        self,
+        tmp_path,
+    ) -> None:
+        target = tmp_path / "clone"
+        included = tmp_path / "target-gitconfig"
+        included.write_text(
+            '[url "http://mirror.example/"]\n\tinsteadOf = https://git.example.com/\n',
+            encoding="ascii",
+        )
+        global_config = tmp_path / "global-gitconfig"
+        global_config.write_text(
+            f'[includeIf "gitdir:**/clone/.git"]\n\tpath = {included.as_posix()}\n',
+            encoding="ascii",
+        )
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_GLOBAL": str(global_config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("apm_cli.utils.git_env.subprocess.run") as run,
+            pytest.raises(GitUrlRewriteError, match="insecure HTTP"),
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                target,
+                env=env,
+            )
+
+        run.assert_not_called()
+
+    def test_remote_refs_replaces_ambient_repository_environment(self) -> None:
+        config_result = subprocess.CompletedProcess(
+            ["git", "config"],
+            1,
+            stdout=b"",
+            stderr=b"",
+        )
+        network_result = subprocess.CompletedProcess(
+            ["git", "ls-remote"],
+            0,
+            stdout="",
+            stderr="",
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PATH": os.environ["PATH"],
+                    "GIT_DIR": "/invoking/.git",
+                    "GIT_WORK_TREE": "/invoking",
+                },
+                clear=True,
+            ),
+            patch("apm_cli.utils.git_env._git_config_run", return_value=config_result),
+            patch("apm_cli.utils.git_env.subprocess.run", return_value=network_result) as run,
+        ):
+            git_remote_refs("https://git.example.com/acme/repo")
+
+        child = run.call_args.kwargs["env"]
+        assert "GIT_DIR" not in child
+        assert "GIT_WORK_TREE" not in child
+        assert run.call_args.kwargs["cwd"] == str(Path(get_git_executable()).resolve().parent)
+
+    def test_remote_refs_timeout_does_not_expose_authenticated_url(self) -> None:
+        token = "remote-ref-timeout-token"
+        config_result = subprocess.CompletedProcess(
+            ["git", "config"],
+            1,
+            stdout=b"",
+            stderr=b"",
+        )
+        with (
+            patch("apm_cli.utils.git_env._git_config_run", return_value=config_result),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(
+                    ["git", "ls-remote", f"https://{token}@git.example.com/repo"],
+                    30,
+                ),
+            ),
+            pytest.raises(subprocess.TimeoutExpired) as raised,
+        ):
+            git_remote_refs(f"https://{token}@git.example.com/repo")
+
+        assert token not in str(raised.value)
 
     def test_clone_preserves_safe_existing_url_rewrite(self, tmp_path) -> None:
         env = {
@@ -314,6 +727,35 @@ class TestGitSubprocessEnv:
         assert urlsplit(replacement).scheme == "file"
         assert urlsplit(child["GIT_CONFIG_VALUE_0"]).hostname == "git.example.com"
 
+    def test_clone_materializes_parameter_rewrite_when_clearing_http_auth(
+        self,
+        tmp_path,
+    ) -> None:
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_PARAMETERS": (
+                "'url.file:///fixture/.insteadOf=https://git.example.com/' "
+                "'http.extraheader=Authorization: Basic sentinel'"
+            ),
+        }
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ) as run,
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+        child = run.call_args_list[-1].kwargs["env"]
+        assert "GIT_CONFIG_PARAMETERS" not in child
+        values = {child[key] for key in child if key.startswith("GIT_CONFIG_VALUE_")}
+        assert values == {"https://git.example.com/"}
+
     def test_clone_streams_git_progress_to_reporter(self, tmp_path) -> None:
         reporter = MagicMock()
         handler = MagicMock()
@@ -325,8 +767,18 @@ class TestGitSubprocessEnv:
 
         with (
             patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
-            patch("apm_cli.utils.git_env.validate_git_url_rewrite_safety"),
-            patch("apm_cli.utils.git_env.subprocess.Popen", return_value=process),
+            patch(
+                "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
+                return_value=None,
+            ),
+            patch(
+                "apm_cli.utils.git_env._read_effective_git_url_rewrites", return_value=((), False)
+            ),
+            patch(
+                "apm_cli.utils.git_env._git_init_run",
+                return_value=subprocess.CompletedProcess(["git", "init"], 0),
+            ),
+            patch("apm_cli.utils.git_env.subprocess.Popen", return_value=process) as popen,
             patch("git.cmd.handle_process_output", side_effect=stream),
         ):
             clone_git_worktree(
@@ -337,3 +789,28 @@ class TestGitSubprocessEnv:
             )
 
         handler.assert_called_once_with("Receiving objects: 50% (1/2)\n")
+        assert "--progress" in popen.call_args.args[0]
+
+    def test_clone_timeout_does_not_expose_authenticated_url(self, tmp_path) -> None:
+        token = "secret-timeout-token"
+        with (
+            patch(
+                "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
+                return_value=None,
+            ),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(
+                    ["git", "clone", f"https://{token}@git.example.com/repo"],
+                    300,
+                ),
+            ),
+            pytest.raises(subprocess.TimeoutExpired) as raised,
+        ):
+            clone_git_worktree(
+                f"https://{token}@git.example.com/repo",
+                tmp_path / "clone",
+                env={"PATH": os.environ.get("PATH", "")},
+            )
+
+        assert token not in str(raised.value)

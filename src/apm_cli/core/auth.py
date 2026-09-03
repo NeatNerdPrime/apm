@@ -1266,8 +1266,8 @@ class AuthResolver:
     ) -> dict:
         """Pre-built env dict for subprocess git calls.
 
-        ADO, GitLab, and explicitly requested GitHub subprocess credentials
-        use an Authorization header. Other host classes retain GIT_TOKEN.
+        ADO, GitLab, and GitHub-family subprocess credentials use an
+        Authorization header. Other host classes retain GIT_TOKEN.
         """
         env = dict(base_env) if base_env is not None else os.environ.copy()
         AuthResolver._clear_platform_token_env(env)
@@ -1275,7 +1275,8 @@ class AuthResolver:
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GIT_ASKPASS"] = "echo"
         env.update(_GIT_MESSAGE_LOCALE_ENV)
-        header_auth = host_kind in {"ado", "gitlab"} or scheme == "github-basic"
+        github_kinds = {"github", "ghe_cloud", "ghes"}
+        header_auth = host_kind in {"ado", "gitlab", *github_kinds} or scheme == "github-basic"
         if token and header_auth and scheme in {"basic", "bearer", "github-basic"}:
             # ADO, GitLab, and explicit GitHub subprocess credentials use an
             # Authorization header, never argv or GIT_TOKEN.
@@ -1288,7 +1289,7 @@ class AuthResolver:
             if scheme == "bearer":
                 credential = token
                 header_scheme = "Bearer"
-            elif scheme == "github-basic":
+            elif scheme == "github-basic" or host_kind in github_kinds:
                 credential = base64.b64encode(f"x-access-token:{token}".encode()).decode()
                 header_scheme = "Basic"
             elif host_kind == "gitlab":
@@ -1394,9 +1395,12 @@ class AuthResolver:
         base_env: dict,
     ) -> dict:
         """Apply one resolved credential to a hardened Git base environment."""
+        scheme = ctx.auth_scheme
+        if ctx.token and ctx.host_info.kind in {"github", "ghe_cloud", "ghes"}:
+            scheme = "github-basic"
         return AuthResolver._build_git_env(
             ctx.token,
-            scheme=ctx.auth_scheme,
+            scheme=scheme,
             host_kind=ctx.host_info.kind,
             base_env=base_env,
         )

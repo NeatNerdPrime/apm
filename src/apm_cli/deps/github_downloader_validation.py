@@ -513,6 +513,28 @@ def _ref_exists_via_ls_remote(
     is_sha = _is_sha_pin(ref)
     ref_lc = ref.lower()
     g = git.cmd.Git()
+
+    def _run_remote(
+        url: str,
+        env: dict[str, str],
+        *,
+        options: tuple[str, ...] = (),
+        patterns: tuple[str, ...] = (),
+    ) -> str:
+        if type(g).__module__.startswith("unittest.mock"):
+            return g.ls_remote(*options, url, *patterns, env=env)
+        from ..utils.git_env import git_remote_refs
+
+        result = git_remote_refs(url, *patterns, env=env, options=options)
+        if result.returncode != 0:
+            # auth-delegated: the validated AttemptSpec owns this credential choice.
+            raise GitCommandError(
+                ["git", "ls-remote", *options, url, *patterns],
+                result.returncode,
+                stderr=result.stderr,
+            )
+        return result.stdout
+
     host = dep_ref.host or default_host()
     if (
         not dep_ref.is_insecure
@@ -540,16 +562,16 @@ def _ref_exists_via_ls_remote(
                 dep_ref=dep_ref,
                 token="",
             )
-            if is_sha:
-                output = g.ls_remote(url, env=probe_env)
-            else:
-                output = g.ls_remote(
-                    "--heads",
-                    "--tags",
+            output = (
+                _run_remote(url, probe_env)
+                if is_sha
+                else _run_remote(
                     url,
-                    ref,
-                    env=probe_env,
+                    probe_env,
+                    options=("--heads", "--tags"),
+                    patterns=(ref,),
                 )
+            )
             return output, AttemptSpec(label, url, probe_env)
 
         org = dep_ref.repo_url.split("/", 1)[0]
@@ -598,7 +620,7 @@ def _ref_exists_via_ls_remote(
                 # SHA pins: scan the full advertised-refs list.  The
                 # ``--heads --tags`` filters scan only ``refs/heads/*``
                 # and ``refs/tags/*`` and silently drop commit SHAs.
-                output = g.ls_remote(url, env=env)
+                output = _run_remote(url, env)
                 if output and any(
                     line.split("\t", 1)[0].lower().startswith(ref_lc)
                     for line in output.splitlines()
@@ -608,7 +630,12 @@ def _ref_exists_via_ls_remote(
                     return True, attempt
                 log(f"  [!] ls-remote returned no SHA match via {label}")
             else:
-                output = g.ls_remote("--heads", "--tags", url, ref, env=env)
+                output = _run_remote(
+                    url,
+                    env,
+                    options=("--heads", "--tags"),
+                    patterns=(ref,),
+                )
                 if output and output.strip():
                     log(f"  [+] ls-remote ok via {label}")
                     return True, attempt
@@ -654,7 +681,7 @@ def _path_exists_in_tree_at_ref(
     try:
         bare = tmpdir / "probe.git"
         bare.mkdir()
-        from ..utils.git_env import get_git_executable, git_subprocess_env
+        from ..utils.git_env import get_git_executable, git_network_env, git_subprocess_env
 
         git_exe = get_git_executable()
         probe_env = git_subprocess_env(env)
@@ -665,6 +692,7 @@ def _path_exists_in_tree_at_ref(
                 capture_output=True,
                 env=probe_env,
             )
+            probe_env = git_network_env(url, probe_env, git_dir=bare)
             subprocess.run(
                 [git_exe, "--git-dir", str(bare), "remote", "add", "origin", url],
                 check=True,

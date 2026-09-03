@@ -176,7 +176,7 @@ def _preflight_auth_check(ctx, auth_resolver, verbose: bool) -> None:
             dep.repo_url,
             use_ssh=_use_ssh,
             dep_ref=dep,
-            token=dep_ctx.token,
+            token="",
             auth_scheme=_auth_scheme,
         )
         probe_env = auth_resolver.git_env_for_context(
@@ -202,13 +202,13 @@ def _preflight_auth_check(ctx, auth_resolver, verbose: bool) -> None:
             # auth-delegated: invoked via _primary_op/_bearer_op below, both
             # routed through auth_resolver.execute_with_bearer_fallback.
             try:
-                return _sp.run(
-                    ["git", "ls-remote", "--heads", "--exit-code", url],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
+                from ..utils.git_env import git_remote_refs
+
+                return git_remote_refs(
+                    url,
                     timeout=30,
                     env=env,
+                    options=("--heads", "--exit-code"),
                 )
             except _sp.TimeoutExpired:
                 return None  # network timeout sentinel; treated as non-auth

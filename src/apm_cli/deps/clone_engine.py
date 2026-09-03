@@ -153,12 +153,23 @@ class CloneEngine:
         dep_host = dep_ref.host if dep_ref else None
         is_github = is_github_hostname(dep_host) if dep_host else True
         is_generic = not is_ado and not is_github
+        rewrite_candidate = (
+            host._build_repo_url(
+                repo_url_base,
+                use_ssh=False,
+                dep_ref=dep_ref,
+                token="",
+            )
+            if dep_ref is not None
+            else None
+        )
 
         anonymous_plan = self._transport_selector.select(
             dep_ref=dep_ref,
             cli_pref=self._protocol_pref,
             allow_fallback=self._allow_fallback,
             has_token=False,
+            candidate_url=rewrite_candidate,
         )
         public_github_https_first = bool(
             dep_ref is not None
@@ -192,26 +203,56 @@ class CloneEngine:
             f"allow_fallback={self._allow_fallback}"
         )
 
-        def _env_for(attempt: TransportAttempt) -> dict[str, str]:
+        def _env_for(attempt: TransportAttempt, attempt_url: str) -> dict[str, str]:
+            def _without_platform_credentials(env: dict[str, str]) -> dict[str, str]:
+                from ..core.auth import AuthResolver
+
+                AuthResolver._clear_platform_token_env(env, remove=True)
+                return env
+
             if attempt.use_token:
                 if dep_auth_ctx is not None:
                     return host.auth_resolver.git_env_for_context(
                         dep_auth_ctx,
                         base_env=host.git_env,
                     )
-                return host.git_env
+                host_kind = host.auth_resolver.classify_host(
+                    dep_host or default_host(),
+                    port=dep_ref.port if dep_ref is not None else None,
+                    host_type=dep_ref.host_type if dep_ref is not None else None,
+                ).kind
+                return host.auth_resolver._build_git_env(
+                    dep_token,
+                    host_kind=host_kind,
+                    base_env=host.git_env,
+                )
             if attempt.scheme == "http":
-                return host._build_noninteractive_git_env(
-                    preserve_config_isolation=True,
-                    suppress_credential_helpers=True,
+                return _without_platform_credentials(
+                    host._build_noninteractive_git_env(
+                        preserve_config_isolation=True,
+                        suppress_credential_helpers=True,
+                    )
                 )
             if is_ado:
-                return host.auth_resolver.build_noninteractive_git_env(
-                    base_env=host.git_env,
-                    host_kind="ado",
-                    preserve_config_isolation=True,
+                return _without_platform_credentials(
+                    host.auth_resolver.build_noninteractive_git_env(
+                        base_env=host.git_env,
+                        host_kind="ado",
+                        preserve_config_isolation=True,
+                    )
                 )
-            return host._build_noninteractive_git_env()
+            if is_generic and dep_ref is not None:
+                org = repo_url_base.split("/", 1)[0] if "/" in repo_url_base else None
+                policy_url = attempt.effective_url or attempt_url
+                context = host.auth_resolver.resolve_for_remote(
+                    dep_host or default_host(),
+                    policy_url,
+                    org,
+                    port=dep_ref.port,
+                    host_type=dep_ref.host_type,
+                )
+                return host.auth_resolver.git_env_for_remote(context, policy_url)
+            return _without_platform_credentials(host._build_noninteractive_git_env())
 
         plan: TransportPlan = (
             anonymous_plan
@@ -221,6 +262,7 @@ class CloneEngine:
                 cli_pref=self._protocol_pref,
                 allow_fallback=self._allow_fallback,
                 has_token=has_token,
+                candidate_url=rewrite_candidate,
             )
         )
         _debug(
@@ -282,7 +324,7 @@ class CloneEngine:
                     repo_url_base,
                     use_ssh=False,
                     dep_ref=dep_ref,
-                    token=token or "",
+                    token="",
                     auth_scheme="basic",
                 )
                 clone_action(winning_url, git_env, target_path)
@@ -316,13 +358,15 @@ class CloneEngine:
                 and dep_ref is not None
             )
             url = ""
-            if not lazy_public_attempt:
+            if attempt.requested_url is not None:
+                url = attempt.requested_url
+            elif not lazy_public_attempt:
                 try:
                     url = host._build_repo_url(
                         repo_url_base,
                         use_ssh=use_ssh,
                         dep_ref=dep_ref,
-                        token=dep_token if attempt.use_token else "",
+                        token="",
                         auth_scheme=dep_auth_scheme if attempt.use_token else "basic",
                     )
                 except Exception as e:
@@ -341,7 +385,7 @@ class CloneEngine:
                 if lazy_public_attempt:
                     url, authenticated_fallback_used = _run_public_github_attempt()
                 else:
-                    clone_action(url, _env_for(attempt), target_path)
+                    clone_action(url, _env_for(attempt, url), target_path)
                 if verbose_callback:
                     display = (
                         host._sanitize_git_error(url)
@@ -350,7 +394,11 @@ class CloneEngine:
                     )
                     verbose_callback(f"Cloned from: {display}")
                 return
-            except (GitCommandError, subprocess.CalledProcessError) as e:
+            except (
+                GitCommandError,
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ) as e:
                 err_msg = str(e)
                 stderr_attr = getattr(e, "stderr", None)
                 if stderr_attr:
@@ -404,6 +452,7 @@ class CloneEngine:
                                 AzureCliBearerError,
                                 GitCommandError,
                                 subprocess.CalledProcessError,
+                                subprocess.TimeoutExpired,
                             ):
                                 pass
                     except ImportError:

@@ -341,7 +341,7 @@ def test_private_github_fallback_normalizes_locale_and_completes_lifecycle(
         assert all(event["language"] == "C" for event in remote_events)
         remote_attempts = [remote for event in remote_events for remote in event["remotes"]]
         assert remote_attempts[0]["authenticated_url"] is False
-        assert any(remote["authenticated_url"] is True for remote in remote_attempts)
+        assert all(remote["authenticated_url"] is False for remote in remote_attempts)
         header_authenticated_events = [
             event for event in remote_events if event["auth_config_present"] is True
         ]

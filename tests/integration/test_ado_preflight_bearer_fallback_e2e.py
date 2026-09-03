@@ -19,14 +19,26 @@ preflight raised AuthenticationError on the first 401 without retrying.
 import os
 import stat
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+from apm_cli.utils.git_env import reset_git_cache
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only fake-binary E2E; Windows variant lives in test-integration.ps1",
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_git_executable_between_fake_path_scenarios() -> Iterator[None]:
+    """Each fake-PATH scenario must resolve its own Git executable."""
+    reset_git_cache()
+    yield
+    reset_git_cache()
+
 
 FAKE_GIT = r"""#!/usr/bin/env python3
 """

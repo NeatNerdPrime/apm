@@ -202,6 +202,37 @@ def test_https_to_http_url_rewrite_is_rejected_before_git_runs(
         )
 
 
+def test_authenticated_cross_origin_https_rewrite_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """A resolved token cannot follow an insteadOf rule to another host."""
+
+    class _RewriteTokenManager(_TokenManager):
+        def setup_environment(self) -> dict[str, str]:
+            return {
+                **super().setup_environment(),
+                "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"),
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "url.https://mirror.example/.insteadOf",
+                "GIT_CONFIG_VALUE_0": "https://gitlab.com/",
+            }
+
+    (tmp_path / "gitconfig").write_text("", encoding="ascii")
+    context = AuthContext(
+        token="resolved-token",
+        source="test",
+        token_type="unknown",
+        host_info=_context("gitlab").host_info,
+        git_env={},
+    )
+
+    with pytest.raises(ValueError, match="different HTTPS origin"):
+        AuthResolver(token_manager=_RewriteTokenManager()).git_env_for_remote(
+            context,
+            "https://gitlab.com/org/repo.git",
+        )
+
+
 @pytest.mark.parametrize(
     ("remote_url", "expected_lookups"),
     [

@@ -110,3 +110,53 @@ def test_url_rewrite_subprocess_env_reaches_owned_commit_through_real_cli_instal
 
     deployed_skill = project.root / ".agents" / "skills" / _SKILL_NAME / "SKILL.md"
     assert deployed_skill.read_bytes() == _SKILL_BYTES
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    (
+        ("https://token@mirror.example/repo", "must not contain credentials"),
+        ("http://127.0.0.1:9/repo", "must not rewrite to insecure HTTP"),
+        ("git://mirror.example/repo", "must not rewrite to an insecure transport"),
+        ("ext::helper", "must not rewrite to an insecure transport"),
+    ),
+)
+def test_install_rejects_unsafe_rewrite_after_safe_indexes(
+    tmp_path: Path,
+    apm_binary_path: Path,
+    replacement: str,
+    message: str,
+) -> None:
+    """A packaged CLI install validates every indexed rewrite before network use."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / "scenario",
+        base_env=dict(os.environ),
+    )
+    child_env = isolated.subprocess_env()
+    child_env["GIT_CONFIG_COUNT"] = "2"
+    child_env["GIT_CONFIG_KEY_0"] = "url.file:///unrelated/.insteadOf"
+    child_env["GIT_CONFIG_VALUE_0"] = "https://unrelated.example/repo"
+    child_env["GIT_CONFIG_KEY_1"] = f"url.{replacement}.insteadOf"
+    child_env["GIT_CONFIG_VALUE_1"] = _REMOTE_URL
+
+    project = LocalPackageFactory(isolated.work_root).create(
+        "unsafe-rewrite-consumer",
+        dependencies=(_DEPENDENCY,),
+        targets=("copilot",),
+    )
+    result = subprocess.run(
+        (str(apm_binary_path), *_INSTALL_ARGS, "--https"),
+        cwd=project.root,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode != 0
+    output = f"{result.stdout}\n{result.stderr}"
+    normalized = " ".join(output.split())
+    assert message in output
+    assert "git config" in normalized
+    assert "--show-origin" in normalized
+    assert "remove the unsafe rule" in normalized

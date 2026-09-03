@@ -60,9 +60,10 @@ def _write_credential_helper(home: Path, log_path: Path) -> Path:
         "import os\n"
         "from pathlib import Path\n"
         f"names = {list(_SENTINEL_NAMES)!r}\n"
-        "Path(os.environ['APM_TEST_HELPER_LOG']).write_text(\n"
-        "    json.dumps([name for name in names if name in os.environ]), encoding='utf-8'\n"
-        ")\n"
+        "path = Path(os.environ['APM_TEST_HELPER_LOG'])\n"
+        "observations = json.loads(path.read_text()) if path.exists() else []\n"
+        "observations.append([name for name in names if name in os.environ])\n"
+        "path.write_text(json.dumps(observations), encoding='utf-8')\n"
         "print('username=x-access-token')\n"
         f"print('password={_HELPER_PASSWORD}')\n",
         encoding="ascii",
@@ -168,10 +169,12 @@ def test_generic_https_marketplace_add_uses_native_credential_helper(
             env=environment,
         )
 
-    assert add_result.returncode == 0, add_result.stderr
+    assert add_result.returncode == 0, f"stdout={add_result.stdout!r}\nstderr={add_result.stderr!r}"
     assert list_result.returncode == 0, list_result.stderr
     assert helper_log.exists()
-    assert json.loads(helper_log.read_text(encoding="utf-8")) == []
+    observations = json.loads(helper_log.read_text(encoding="utf-8"))
+    assert observations
+    assert all(not names for names in observations)
     saved = json.loads((isolated.config_root / "marketplaces.json").read_text(encoding="utf-8"))
     assert len(saved["marketplaces"]) == 1
     assert saved["marketplaces"][0]["name"] == "generic-marketplace"

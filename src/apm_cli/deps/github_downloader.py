@@ -35,7 +35,7 @@ from ..utils.console import (
 )
 from ..utils.git_env import (
     checkout_git_worktree,
-    git_subprocess_env,
+    git_no_hooks_args,
     git_subprocess_error_text,
     git_worktree_head,
 )
@@ -1216,22 +1216,14 @@ class GitHubPackageDownloader:
                 setup_env = self.auth_resolver.build_public_github_anonymous_git_env(
                     base_env=self.git_env,
                 )
-                setup_cmds = [
-                    ["git", "init"],
-                    ["git", "remote", "add", "origin", anonymous_url],
-                ]
-                for cmd in setup_cmds:
-                    result = subprocess.run(
-                        cmd,
-                        cwd=str(temp_clone_path),
-                        env=setup_env,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        timeout=120,
-                    )
-                    if result.returncode != 0:
-                        return False
+                from ..utils.git_env import init_git_remote_worktree
+
+                setup_env = init_git_remote_worktree(
+                    temp_clone_path,
+                    anonymous_url,
+                    setup_env,
+                    run=subprocess.run,
+                )
                 apply_sparse_cone(
                     "git",
                     temp_clone_path,
@@ -1241,13 +1233,23 @@ class GitHubPackageDownloader:
                 )
 
                 def _fetch(token: str | None, git_env: dict[str, str]) -> None:
+                    from ..utils.git_env import git_network_env
+
+                    winning_url = anonymous_url
                     if token is not None:
                         authenticated_url = self._build_repo_url(
                             dep_ref.repo_url,
                             use_ssh=False,
                             dep_ref=dep_ref,
-                            token=token or "",
+                            token="",
                         )
+                        winning_url = authenticated_url
+                    git_env = git_network_env(
+                        winning_url,
+                        git_env,
+                        worktree=temp_clone_path,
+                    )
+                    if token is not None:
                         remote_result = subprocess.run(
                             ["git", "remote", "set-url", "origin", authenticated_url],
                             cwd=str(temp_clone_path),
@@ -1293,7 +1295,7 @@ class GitHubPackageDownloader:
                     base_env=self.git_env,
                 )
                 checkout_result = subprocess.run(
-                    ["git", "checkout", "FETCH_HEAD"],
+                    ["git", *git_no_hooks_args(), "checkout", "FETCH_HEAD"],
                     cwd=str(temp_clone_path),
                     env=setup_env,
                     capture_output=True,
@@ -1307,44 +1309,38 @@ class GitHubPackageDownloader:
 
             # Resolve per-dependency auth via AuthResolver.
             dep_auth_ctx = self._resolve_dep_auth_ctx(dep_ref)
-            dep_token = dep_auth_ctx.token if dep_auth_ctx else self.github_token
             dep_auth_scheme = dep_auth_ctx.auth_scheme if dep_auth_ctx else "basic"
-
-            # Use the per-dependency AuthContext env for every classified host.
+            auth_url = self._build_repo_url(
+                dep_ref.repo_url,
+                use_ssh=False,
+                dep_ref=dep_ref,
+                token="",
+                auth_scheme=dep_auth_scheme,
+            )
             if dep_auth_ctx is not None:
                 env = self.auth_resolver.git_env_for_context(
                     dep_auth_ctx,
                     base_env=self.git_env,
                 )
             else:
-                env = git_subprocess_env(self.git_env)
-            auth_url = self._build_repo_url(
-                dep_ref.repo_url,
-                use_ssh=False,
-                dep_ref=dep_ref,
-                token=dep_token,
-                auth_scheme=dep_auth_scheme,
-            )
-
-            cmds = [
-                ["git", "init"],
-                ["git", "remote", "add", "origin", auth_url],
-            ]
-            for cmd in cmds:
-                result = subprocess.run(
-                    cmd,
-                    cwd=str(temp_clone_path),
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    timeout=120,
+                org = dep_ref.repo_url.split("/", 1)[0]
+                generic_ctx = self.auth_resolver.resolve_for_remote(
+                    dep_ref.host or default_host(),
+                    auth_url,
+                    org,
+                    port=dep_ref.port,
+                    host_type=dep_ref.host_type,
                 )
-                if result.returncode != 0:
-                    _debug(
-                        f"Sparse-checkout step failed ({' '.join(cmd)}): {result.stderr.strip()}"
-                    )
-                    return False
+                env = self.auth_resolver.git_env_for_remote(generic_ctx, auth_url)
+
+            from ..utils.git_env import init_git_remote_worktree
+
+            env = init_git_remote_worktree(
+                temp_clone_path,
+                auth_url,
+                env,
+                run=subprocess.run,
+            )
             apply_sparse_cone(
                 "git",
                 temp_clone_path,
@@ -1355,7 +1351,10 @@ class GitHubPackageDownloader:
             fetch_cmd = ["git", "fetch", "origin"]
             fetch_cmd.append(ref or "HEAD")
             fetch_cmd.append("--depth=1")
-            checkout_cmds = [fetch_cmd, ["git", "checkout", "FETCH_HEAD"]]
+            checkout_cmds = [
+                fetch_cmd,
+                ["git", *git_no_hooks_args(), "checkout", "FETCH_HEAD"],
+            ]
 
             for cmd in checkout_cmds:
                 result = subprocess.run(

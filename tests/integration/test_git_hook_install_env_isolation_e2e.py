@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests.integration.test_marketplace_generic_https_credential_lifecycle import (
+    _HELPER_PASSWORD,
+    _git_exec_path,
+    _real_git,
+    _write_credential_helper,
+    _write_tls_certificate,
+)
 from tests.utils.isolated_apm_environment import IsolatedApmEnvironment
+from tests.utils.local_git_http_server import LocalGitHttpServerFactory
 from tests.utils.local_git_repository import LocalGitRepositoryFactory
 from tests.utils.local_package import LocalPackageFactory
 
@@ -54,6 +64,28 @@ def test_apm_install_from_git_hook_preserves_invoking_worktree(
     package_factory = LocalPackageFactory(isolated.package_root)
     source = package_factory.create("hook-proof-source")
     package_factory.add_skill(source, "hook-proof", _SKILL_BYTES.decode("ascii"))
+    marker = isolated.root / "dependency-hook-ran"
+    hook = source.root / ".githooks" / "post-checkout"
+    hook.parent.mkdir()
+    hook.write_text(
+        f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\n",
+        encoding="ascii",
+    )
+    hook.chmod(0o755)
+    subprocess.run(
+        (
+            "git",
+            "config",
+            "--file",
+            environment["GIT_CONFIG_GLOBAL"],
+            "core.hooksPath",
+            ".githooks",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
 
     repositories = LocalGitRepositoryFactory(isolated.repository_root, env=environment)
     repository = repositories.create("hook-proof", source_tree=source.root)
@@ -113,3 +145,96 @@ def test_apm_install_from_git_hook_preserves_invoking_worktree(
     assert _git(hook_worktree, environment, "rev-parse", "HEAD") == invoking_sha
     deployed = hook_worktree / ".agents" / "skills" / "hook-proof" / "SKILL.md"
     assert deployed.read_bytes() == _SKILL_BYTES
+    assert not marker.exists()
+
+
+def test_generic_https_dependency_helper_receives_no_platform_credentials(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """A real generic dependency uses its helper without platform credential bleed."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / "scenario",
+        base_env=dict(os.environ),
+    )
+    helper_log = isolated.root / "credential-helper.json"
+    _write_credential_helper(isolated.home, helper_log)
+    environment = isolated.subprocess_env()
+    environment.update(
+        {
+            "ADO_APM_PAT": "ado-sentinel",
+            "GH_TOKEN": "gh-sentinel",
+            "GITHUB_APM_PAT": "github-apm-sentinel",
+            "GITHUB_TOKEN": "github-sentinel",
+            "GIT_HTTP_EXTRAHEADER": "Authorization: sentinel",
+            "GIT_TOKEN": "git-sentinel",
+            "APM_TEST_HELPER_LOG": str(helper_log),
+            "GIT_ALLOW_PROTOCOL": "file:http:https",
+            "GIT_SSL_NO_VERIFY": "1",
+        }
+    )
+    real_git = _real_git()
+    environment["GIT_EXEC_PATH"] = _git_exec_path(real_git)
+    package_factory = LocalPackageFactory(isolated.package_root)
+    source = package_factory.create("generic-source")
+    package_factory.add_skill(
+        source,
+        "hook-proof",
+        _SKILL_BYTES.decode("ascii"),
+    )
+    repositories = LocalGitRepositoryFactory(isolated.repository_root, env=environment)
+    repository = repositories.create("generic-dependency", source_tree=source.root)
+    repositories.commit(repository, message="seed generic dependency")
+    certificate, key = _write_tls_certificate(isolated.root)
+    server_factory = LocalGitHttpServerFactory(
+        isolated.repository_root,
+        real_git=real_git,
+        env=environment,
+    )
+
+    with server_factory.start(
+        (repository,),
+        username="x-access-token",
+        password=_HELPER_PASSWORD,
+        private_repositories=(repository,),
+        certfile=certificate,
+        keyfile=key,
+    ) as server:
+        remote_url = "https://git.example.test/acme/generic-dependency.git"
+        local_url = server.remote_url(repository)
+        environment["GIT_CONFIG_COUNT"] = "1"
+        environment["GIT_CONFIG_KEY_0"] = f"url.{local_url}.insteadOf"
+        environment["GIT_CONFIG_VALUE_0"] = remote_url
+        consumer = LocalPackageFactory(isolated.work_root).create(
+            "consumer",
+            dependencies=(
+                {
+                    "git": remote_url,
+                    "path": _SKILL_PATH,
+                    "ref": "main",
+                },
+            ),
+            targets=("copilot",),
+        )
+        result = subprocess.run(
+            (
+                str(apm_binary_path),
+                "install",
+                "--target",
+                "copilot",
+                "--no-policy",
+                "--parallel-downloads",
+                "0",
+            ),
+            cwd=consumer.root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    assert result.returncode == 0, f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+    assert helper_log.exists()
+    observations = json.loads(helper_log.read_text(encoding="utf-8"))
+    assert observations
+    assert all(not names for names in observations)

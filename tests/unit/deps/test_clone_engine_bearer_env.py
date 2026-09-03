@@ -85,3 +85,101 @@ def test_bearer_retry_sets_header_preserving_retained_git_config(tmp_path: Path)
     assert bearer_env["GIT_CONFIG_VALUE_1"] == "Authorization: Bearer fake-bearer-token"
     # The retry must not mutate the host's shared base env.
     assert host.git_env["GIT_CONFIG_COUNT"] == "1"
+
+
+def test_configured_rewrite_executes_requested_url_once(tmp_path: Path) -> None:
+    """Git, not the selector, applies the resolved rewrite to the argv URL."""
+    host = _ado_host({})
+    requested = "https://github.com/owner/repo"
+    effective = "file:///fixture/owner/repo"
+    host._transport_selector.select.return_value = TransportPlan(
+        attempts=[
+            TransportAttempt(
+                scheme="file",
+                label="Git URL rewrite (file)",
+                use_token=False,
+                requested_url=requested,
+                effective_url=effective,
+            )
+        ],
+        strict=True,
+    )
+    host._resolve_dep_token.return_value = None
+    host._resolve_dep_auth_ctx.return_value = None
+    host.auth_resolver.uses_public_github_anonymous_first.return_value = False
+    host._build_noninteractive_git_env.return_value = {}
+    urls: list[str] = []
+
+    CloneEngine(host).execute(
+        "owner/repo",
+        tmp_path / "dst",
+        dep_ref=DependencyReference.parse("owner/repo"),
+        clone_action=lambda url, _env, _target: urls.append(url),
+    )
+
+    assert urls == [requested]
+
+
+def test_github_token_uses_header_not_clone_url(tmp_path: Path) -> None:
+    """Resolved GitHub credentials stay out of argv and repository metadata."""
+    host = _ado_host({})
+    host._transport_selector.select.return_value = TransportPlan(
+        attempts=[TransportAttempt(scheme="https", label="https-token", use_token=True)],
+        strict=True,
+    )
+    context = host._resolve_dep_auth_ctx.return_value
+    context.host_info.kind = "github"
+    host._build_repo_url.side_effect = lambda *_args, **kwargs: (
+        f"https://{kwargs['token']}@github.com/owner/repo"
+        if kwargs.get("token")
+        else "https://github.com/owner/repo"
+    )
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    CloneEngine(host).execute(
+        "owner/repo",
+        tmp_path / "dst",
+        dep_ref=DependencyReference.parse("owner/repo"),
+        clone_action=lambda url, env, _target: seen.append((url, env)),
+    )
+
+    assert seen[0][0] == "https://github.com/owner/repo"
+    assert "GIT_TOKEN" not in seen[0][1]
+    assert any(
+        key.startswith("GIT_CONFIG_KEY_") and value == "http.extraheader"
+        for key, value in seen[0][1].items()
+    )
+
+
+def test_gitlab_rewrite_uses_effective_transport_credential_policy(tmp_path: Path) -> None:
+    """A GitLab rewrite to file transport cannot retain its HTTPS header."""
+    host = _ado_host({})
+    requested = "https://gitlab.com/owner/repo.git"
+    effective = "file:///fixture/owner/repo.git"
+    host._transport_selector.select.return_value = TransportPlan(
+        attempts=[
+            TransportAttempt(
+                scheme="file",
+                label="Git URL rewrite (file)",
+                use_token=False,
+                requested_url=requested,
+                effective_url=effective,
+            )
+        ],
+        strict=True,
+    )
+    context = host._resolve_dep_auth_ctx.return_value
+    context.host_info.kind = "gitlab"
+    host.auth_resolver.resolve_for_remote.return_value = context
+    host.auth_resolver.git_env_for_remote.return_value = {"CLEAN": "1"}
+    seen_envs: list[dict[str, str]] = []
+
+    CloneEngine(host).execute(
+        "owner/repo",
+        tmp_path / "dst",
+        dep_ref=DependencyReference.parse("https://gitlab.com/owner/repo.git"),
+        clone_action=lambda _url, env, _target: seen_envs.append(env),
+    )
+
+    host.auth_resolver.git_env_for_remote.assert_called_with(context, effective)
+    assert seen_envs == [{"CLEAN": "1"}]

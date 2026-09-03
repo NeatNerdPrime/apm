@@ -17,7 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `apm install` launched from Git hooks now isolates dependency Git operations
   from the invoking repository, preventing installs from detaching or mutating
-  the caller's branch. (#2759)
+  the caller's branch. Safe Git URL rewrites remain supported; credential-bearing,
+  insecure, and authenticated cross-origin rewrites now fail before network use,
+  and managed credentials stay out of Git URL arguments and stored remotes.
+  (#2759)
 - `apm install` now preserves previously deployed skills when package
   integration is skipped instead of treating them as stale cleanup candidates.
   (#2758)

@@ -7,6 +7,7 @@ import os
 import subprocess
 import time
 import urllib.parse
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -439,7 +440,8 @@ class TestRefResolver:
         resolver.list_remote_refs("acme/tools")
         args, kwargs = mock_run.call_args
         cmd = args[0]
-        assert cmd[:4] == ["git", "ls-remote", "--tags", "--heads"]
+        assert Path(cmd[0]).name == "git"
+        assert cmd[1:4] == ["ls-remote", "--tags", "--heads"]
         parsed = urllib.parse.urlparse(cmd[4])
         assert parsed.hostname == "github.com"
         assert parsed.path.rstrip("/") == "/acme/tools.git"
@@ -569,7 +571,8 @@ class TestResolveRefSha:
         # Verify command uses the ref directly (no --tags --heads).
         args, kwargs = mock_run.call_args  # noqa: RUF059
         cmd = args[0]
-        assert cmd[:2] == ["git", "ls-remote"]
+        assert Path(cmd[0]).name == "git"
+        assert cmd[1] == "ls-remote"
         assert cmd[-1] == "main"
         parsed = urllib.parse.urlparse(cmd[2])
         assert parsed.hostname == "github.com"
@@ -773,8 +776,8 @@ class TestRefResolverGHEHost:
 class TestRefResolverTokenInjection:
     """Token injection into ls-remote URLs."""
 
-    def test_token_injected_in_url(self) -> None:
-        """When token is provided, URL uses x-access-token auth and ends with .git."""
+    def test_token_uses_header_and_url_has_no_userinfo(self) -> None:
+        """When token is provided, the URL remains credential-free."""
         resolver = RefResolver(host="github.com", token="ghp_testtoken123")
         with patch("apm_cli.marketplace.ref_resolver.subprocess.run") as mock_run:
             mock_run.return_value = _make_completed("aaaa" * 10 + "\trefs/tags/v1.0.0\n")
@@ -785,8 +788,15 @@ class TestRefResolverTokenInjection:
             parsed = urllib.parse.urlparse(url_arg)
             assert parsed.scheme == "https"
             assert parsed.hostname == "github.com"
-            assert parsed.username == "x-access-token"
+            assert parsed.username is None
+            assert parsed.password is None
             assert parsed.path.endswith(".git")
+            values = [
+                value
+                for key, value in mock_run.call_args.kwargs["env"].items()
+                if key.startswith("GIT_CONFIG_VALUE_")
+            ]
+            assert any(value.startswith("Authorization: Basic ") for value in values)
 
     def test_no_token_url_has_git_suffix(self) -> None:
         """Without token, URL still ends with .git and has no userinfo."""
@@ -800,8 +810,8 @@ class TestRefResolverTokenInjection:
             assert parsed.path.endswith(".git")
             assert parsed.username is None
 
-    def test_resolve_ref_sha_with_token(self) -> None:
-        """Token is also injected in resolve_ref_sha URL."""
+    def test_resolve_ref_sha_with_token_uses_header(self) -> None:
+        """Single-ref resolution also keeps the token out of its URL."""
         resolver = RefResolver(host="corp.ghe.com", token="ghp_xxx")
         with patch("apm_cli.marketplace.ref_resolver.subprocess.run") as mock_run:
             mock_run.return_value = _make_completed("bbbb" * 10 + "\trefs/heads/main\n")
@@ -811,7 +821,8 @@ class TestRefResolverTokenInjection:
             url_arg = cmd_args[2]
             parsed = urllib.parse.urlparse(url_arg)
             assert parsed.hostname == "corp.ghe.com"
-            assert parsed.username == "x-access-token"
+            assert parsed.username is None
+            assert parsed.password is None
             assert parsed.path.endswith(".git")
 
     def test_bearer_auth_rejects_non_ado_host(self) -> None:

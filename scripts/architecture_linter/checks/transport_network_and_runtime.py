@@ -195,7 +195,9 @@ def _check_git_semver_preflight(provider: FactsProvider) -> tuple[Violation, ...
             _REF_REUSE,
             (
                 "transport_plan = transport_selector.select(",
-                'transport_scheme = "ssh" if selected_scheme == "ssh" else "https"',
+                "candidate_url=rewrite_candidate",
+                "selected_attempt = transport_plan.attempts[0]",
+                "selected_attempt.requested_url is not None",
                 "transport_scheme=transport_scheme",
             ),
             "ref_reuse must select transport through TransportSelector",

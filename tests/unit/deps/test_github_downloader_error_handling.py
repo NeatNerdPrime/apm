@@ -1015,8 +1015,13 @@ class TestTrySparseCheckout:
             "PATH": "/usr/bin",
             "GIT_DIR": "/invoking/.git",
             "GIT_WORK_TREE": "/invoking",
+            "GITHUB_TOKEN": "must-not-reach-generic-host",
+            "GIT_HTTP_EXTRAHEADER": "Authorization: Basic stale",
         }
         downloader.auth_resolver.resolve_for_dep.return_value = None
+        generic_ctx = MagicMock()
+        downloader.auth_resolver.resolve_for_remote.return_value = generic_ctx
+        downloader.auth_resolver.git_env_for_remote.return_value = {"PATH": "/usr/bin"}
         ok_result = MagicMock(returncode=0, stderr="")
         environments: list[dict[str, str]] = []
 
@@ -1031,6 +1036,12 @@ class TestTrySparseCheckout:
         assert environments
         assert all("GIT_DIR" not in env for env in environments)
         assert all("GIT_WORK_TREE" not in env for env in environments)
+        assert all("GITHUB_TOKEN" not in env for env in environments)
+        assert all("GIT_HTTP_EXTRAHEADER" not in env for env in environments)
+        downloader.auth_resolver.git_env_for_remote.assert_called_once_with(
+            generic_ctx,
+            "https://git.example.com/o/r",
+        )
 
 
 # ---------------------------------------------------------------------------
