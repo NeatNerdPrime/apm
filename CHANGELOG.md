@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Architecture ownership guards now use a sharded JSON registry and a
   single-process Python linter while preserving exact-revision compatibility
   and reducing warm median lint time by 75%. (#2739)
+- This repository now pins the `copilot` target so plain `apm install` is deterministic across contributor environments. (by @tillig, #2771)
 
 ### Fixed
 
