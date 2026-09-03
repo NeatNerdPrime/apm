@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole-file line-ending change. (closes #2624) (#2675)
 - `apm compile` now preserves hand-authored root `AGENTS.md` and `CLAUDE.md`
   files, including `--root` destinations, instead of replacing them. (#2779)
+- `apm uninstall` now removes MCP servers only from recorded owning runtimes,
+  accepts JetBrains Copilot JSONC, and reports target cleanup failures after
+  attempting every owner. (by @aryansk, fixes #2551) (#2591)
+- `apm uninstall --global` now removes managed Copilot hook files from
+  `~/.copilot/hooks/` while preserving user-authored hooks. (by @aryansk; closes
+  #2558) (#2559)
+- `apm install` now preserves previously deployed skills when package
+  integration is skipped instead of treating them as stale cleanup candidates.
+  (#2758)
 - `apm compile -g` now honors `target:` and `targets:` in `~/.apm/apm.yml`,
   limiting output to declared harnesses and avoiding stray `$HOME` directories
   when targets are configured. (by @tillig, #2772)

@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from apm_cli.commands.uninstall.cli import _cleanup_stale_lsp, uninstall
 from apm_cli.commands.uninstall.engine import (
+    IntegrationCleanupOutcome,
     LocalSlotRefresh,
     _activate_staged_local_refresh,
     _recover_local_refresh_backups,
@@ -224,7 +225,7 @@ def test_successful_alias_uses_portable_lifecycle_payloads(
         ),
         patch(
             "apm_cli.commands.uninstall.cli._sync_integrations_after_uninstall",
-            return_value=({}, {}),
+            return_value=IntegrationCleanupOutcome({}, {}, [], 0),
         ),
         patch("apm_cli.commands.uninstall.cli._cleanup_stale_mcp"),
     ):
@@ -234,6 +235,49 @@ def test_successful_alias_uses_portable_lifecycle_payloads(
     assert declared_path not in result.output
     assert fire_scripts.call_count == 2
     assert all(call.kwargs["packages"] == (alias,) for call in fire_scripts.call_args_list)
+
+
+def test_preserved_hook_makes_completed_package_removal_nonzero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Incomplete managed-hook cleanup must not report complete success."""
+    project = tmp_path / "project"
+    project.mkdir()
+    package = "owner/installed"
+    _write_manifest(project, [package])
+    dependency = LockedDependency(repo_url=package)
+    LockFile(dependencies={dependency.get_unique_key(): dependency}).write(
+        project / "apm.lock.yaml"
+    )
+    monkeypatch.chdir(project)
+
+    with (
+        patch("apm_cli.commands.uninstall.cli._fire_uninstall_scripts"),
+        patch(
+            "apm_cli.commands.uninstall.cli._remove_packages_from_disk",
+            return_value=0,
+        ),
+        patch(
+            "apm_cli.commands.uninstall.cli._cleanup_transitive_orphans",
+            return_value=(0, set()),
+        ),
+        patch(
+            "apm_cli.commands.uninstall.cli._sync_integrations_after_uninstall",
+            return_value=IntegrationCleanupOutcome(
+                {},
+                {},
+                [".copilot/hooks/preserved.json"],
+                1,
+            ),
+        ),
+        patch("apm_cli.commands.uninstall.cli._cleanup_stale_mcp"),
+    ):
+        result = CliRunner().invoke(uninstall, [package])
+
+    assert result.exit_code == 1
+    assert "managed hook cleanup is incomplete" in result.output
+    assert "Uninstall complete" not in result.output
 
 
 @pytest.mark.parametrize("survivor_mode", ("missing", "malformed"))
@@ -353,7 +397,7 @@ def test_pre_uninstall_manifest_edits_are_reloaded_and_preserved(
         ),
         patch(
             "apm_cli.commands.uninstall.cli._sync_integrations_after_uninstall",
-            return_value=({}, {}),
+            return_value=IntegrationCleanupOutcome({}, {}, [], 0),
         ),
         patch("apm_cli.commands.uninstall.cli._cleanup_stale_mcp"),
     ):
@@ -390,7 +434,7 @@ def test_duplicate_identifier_removes_manifest_entry_once(
         ),
         patch(
             "apm_cli.commands.uninstall.cli._sync_integrations_after_uninstall",
-            return_value=({}, {}),
+            return_value=IntegrationCleanupOutcome({}, {}, [], 0),
         ),
         patch("apm_cli.commands.uninstall.cli._cleanup_stale_mcp"),
     ):
