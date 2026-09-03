@@ -139,7 +139,7 @@ deployments:
 | `dependencies` | list | yes | Resolved APM packages. See [per-entry fields](#per-entry-fields). |
 | `mcp_servers` | list of strings | no | Names of MCP servers managed as of the last install or update, including transitively contributed servers. |
 | `mcp_configs` | map | no | `server_name -> resolved config dict` baseline used to detect MCP drift. |
-| `mcp_target_servers` | map of string lists | no | `target -> server names` for MCP entries APM successfully wrote. Reinstall uses this ownership record to remove only APM-managed entries when a target is dropped. Older lockfiles without this field adopt an existing self-defined native entry only when it exactly matches the stored `mcp_configs` baseline; registry-resolved and user-edited entries remain unowned. |
+| `mcp_target_servers` | map of string lists | no | `target -> server names` for MCP entries APM successfully wrote. Reinstall and uninstall use this ownership record to remove only APM-managed entries. An explicitly empty map authorizes no cleanup. Older lockfiles without this field adopt an existing self-defined native entry only when it exactly matches the stored `mcp_configs` baseline; registry-resolved and user-edited entries remain unowned. |
 | `mcp_config_provenance` | map | no | `server_name -> declaring package` for transitively contributed MCP servers. Used to identify the former owner in `config-consistency` diagnostics; it never exempts a lock-only entry. |
 | `lsp_servers` | list of strings | no | Names of LSP servers declared in the manifest as of the last install or update. |
 | `lsp_configs` | map | no | `server_name -> resolved config dict` baseline used to detect LSP drift. |

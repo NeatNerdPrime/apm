@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `apm compile` now preserves hand-authored root `AGENTS.md` and `CLAUDE.md`
   files, including `--root` destinations, instead of replacing them. (#2779)
+- `apm uninstall` now removes MCP servers only from recorded owning runtimes,
+  accepts JetBrains Copilot JSONC, and reports target cleanup failures after
+  attempting every owner. (by @aryansk, fixes #2551) (#2591)
 - `apm install` now preserves previously deployed skills when package
   integration is skipped instead of treating them as stale cleanup candidates.
   (#2758)

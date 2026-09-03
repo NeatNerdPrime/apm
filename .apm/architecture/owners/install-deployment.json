@@ -10,8 +10,8 @@
     },
     {
       "id": "legacy-mcp-ownership-key-migration",
-      "decision": "Legacy MCP runtime ownership-key migration",
-      "owner": "install/mcp/ownership.py (migrate_legacy_project_target_servers)",
+      "decision": "Legacy MCP target ownership migration and adoption",
+      "owner": "install/mcp/ownership.py",
       "selectors": ["src/apm_cli/install/mcp/ownership.py"],
       "guards": ["install-deployment-mcp-ownership-migration"]
     },

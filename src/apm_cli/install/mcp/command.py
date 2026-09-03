@@ -153,10 +153,12 @@ def run_mcp_install(  # noqa: PLR0913
                 from ...core.scope import InstallScope
 
                 user_scope = scope is InstallScope.USER
-                if _existing_lock and not target_servers_present and old_servers and old_configs:
-                    from .ownership import adopt_legacy_mcp_target_servers
+                if _existing_lock:
+                    from .ownership import resolve_mcp_target_servers
 
-                    old_target_servers = adopt_legacy_mcp_target_servers(
+                    old_target_servers = resolve_mcp_target_servers(
+                        recorded_target_servers=old_target_servers,
+                        ownership_present=target_servers_present,
                         server_names=old_servers,
                         stored_configs=old_configs,
                         project_root=apm_dir,

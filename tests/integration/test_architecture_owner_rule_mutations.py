@@ -281,9 +281,9 @@ MUTATIONS: tuple[MutationCase, ...] = (
         guard_id="install-deployment-mcp-ownership-migration",
         rule_id="install-deployment-mcp-ownership-migration",
         path="src/apm_cli/install/mcp/ownership.py",
-        old="def migrate_legacy_project_target_servers(",
-        new="def migrate_legacy_project_target_servers_disabled(",
-        intent="Legacy MCP ownership-key migration loses its canonical function.",
+        old="def resolve_mcp_target_servers(",
+        new="def resolve_mcp_target_servers_disabled(",
+        intent="Legacy MCP target ownership adoption loses its canonical resolver.",
     ),
     MutationCase(
         guard_id="install-deployment-outcome",

@@ -11,6 +11,7 @@ from ...constants import APM_YML_FILENAME
 from ...core.command_logger import CommandLogger
 from ...models.apm_package import APMPackage
 from .engine import (
+    MCPUninstallCleanupError,
     _cleanup_staged_local_refreshes,
     _cleanup_stale_mcp,
     _cleanup_transitive_orphans,
@@ -454,13 +455,22 @@ def uninstall(ctx, packages, dry_run, verbose, global_):
                 scope=scope,
                 persist=False,
             )
-        except (IntelliJConfigError, PathTraversalError) as cleanup_error:
+        except (
+            IntelliJConfigError,
+            MCPUninstallCleanupError,
+            PathTraversalError,
+        ) as cleanup_error:
             mcp_cleanup_error = cleanup_error
             recovery = ""
             if isinstance(cleanup_error, PathTraversalError):
                 recovery = (
                     " Fix the MCP config path, then run 'apm install' to reconcile "
                     "the stale entry; the package was already removed from apm.yml."
+                )
+            elif isinstance(cleanup_error, MCPUninstallCleanupError):
+                recovery = (
+                    " Fix the reported target configs, then run 'apm install' "
+                    "to reconcile stale MCP entries."
                 )
             logger.error(
                 "Uninstall incomplete: package removal completed, but MCP cleanup failed: "
