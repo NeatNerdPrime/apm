@@ -155,7 +155,6 @@ set = builtins.set
 list = builtins.list
 dict = builtins.dict
 
-
 # ---------------------------------------------------------------------------
 # InstallContext -- parameter bundle for the APM install pipeline
 # ---------------------------------------------------------------------------
@@ -898,14 +897,14 @@ def _handle_mcp_install(  # noqa: PLR0913
 @click.option(
     "--only",
     type=click.Choice(["apm", "mcp"]),
-    help="Install only specific dependency type",
+    help="Install only APM packages or MCP/LSP service dependencies",
 )
 @click.option(
     "--update",
     is_flag=True,
     help="Update dependencies to latest Git references (deprecated: prefer 'apm update' for an interactive plan, or 'apm update --yes' for CI). Unlike --refresh, --update restructures the entire dependency graph.",
 )
-@click.option("--dry-run", is_flag=True, help="Show what would be installed without installing")
+@click.option("--dry-run", is_flag=True, help="Show what would change without writing files")
 @click.option(
     "--force",
     is_flag=True,
@@ -1186,15 +1185,15 @@ def install(  # noqa: C901, PLR0913
 
     Detects AI runtimes from your apm.yml scripts and installs MCP servers for
     all detected runtimes; also installs APM package dependencies from GitHub.
-    --only filters by type (apm or mcp).
+    --only filters to APM packages or MCP/LSP service dependencies.
 
     Examples:
         apm install                             # Install existing deps from apm.yml
         apm install org/pkg1#1.0.0              # Add package to apm.yml and install
         apm install --exclude codex             # Install for all except Codex CLI
-        apm install --only=apm                  # Install only APM dependencies
+        apm install --only=apm                  # Install only APM packages
         apm install --update                    # Update dependencies to latest Git refs
-        apm install --dry-run                   # Show what would be installed
+        apm install --dry-run                   # Show what would change
         apm install -g org/pkg1                 # Install to user scope (~/.apm/)
         apm install --allow-insecure http://...  # HTTP URL (needs allow_insecure)
         apm install --skill my-skill org/bundle  # Install one skill from bundle
@@ -1436,13 +1435,13 @@ def install(  # noqa: C901, PLR0913
             # Precedence: APM_GIT_PROTOCOL env var > apm config ssh > git insteadOf
             from ..config import get_apm_protocol_pref as _get_apm_protocol_pref
 
-            _pref_str = _get_apm_protocol_pref()
+            _pref_str = _get_apm_protocol_pref(bootstrap=not dry_run)
             protocol_pref = ProtocolPreference.from_str(_pref_str)
         # CLI flag > env var (APM_ALLOW_PROTOCOL_FALLBACK) > apm config > default.
         # get_apm_allow_protocol_fallback() already encodes env > config > False.
         from ..config import get_apm_allow_protocol_fallback as _get_apm_apf
 
-        allow_protocol_fallback = allow_protocol_fallback or _get_apm_apf()
+        allow_protocol_fallback = allow_protocol_fallback or _get_apm_apf(bootstrap=not dry_run)
 
         # Resolve scope
         from ..core.scope import (
@@ -1781,6 +1780,7 @@ def _install_apm_packages(ctx, outcome):
             only_packages=ctx.only_packages,
             updated_packages=outcome.updated_packages if outcome is not None else (),
         )
+        prospective_plan = prospective_plan.with_allowed_lsp_dependencies(apm_package, logger)
         logger.record_dry_run_apm_updates(len(prospective_plan.updated_apm_identities))
         _check_insecure_dependencies(
             prospective_plan.selected_apm_dependencies,
@@ -1814,7 +1814,7 @@ def _install_apm_packages(ctx, outcome):
             update=ctx.update,
             apm_dir=ctx.apm_dir,
         )
-        return prospective_plan.apm_dependency_count, prospective_plan.mcp_dependency_count, 0, None
+        return (*prospective_plan.dependency_counts, None)
 
     _check_insecure_dependencies(all_apm_deps, ctx.allow_insecure, logger)
 
