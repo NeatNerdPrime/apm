@@ -634,6 +634,7 @@ install-deployment-lsp-target-contract
 install-deployment-manifest-inheritance-includes
 install-deployment-marketplace-mutation-lock
 install-deployment-mcp-ownership-migration
+install-deployment-mcp-registry-resolution
 install-deployment-outcome
 install-deployment-package-target-authorization
 install-deployment-plugin-bin-eligibility

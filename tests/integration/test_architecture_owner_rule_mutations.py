@@ -326,6 +326,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Legacy MCP target ownership adoption loses its canonical resolver.",
     ),
     MutationCase(
+        guard_id="install-deployment-mcp-registry-resolution",
+        rule_id="install-deployment-mcp-registry-resolution",
+        path="src/apm_cli/registry/client.py",
+        old="def resolve_mcp_registry_url(",
+        new="def resolve_mcp_registry_url_disabled(",
+        intent="The registry client loses the canonical MCP registry precedence resolver.",
+    ),
+    MutationCase(
         guard_id="install-deployment-outcome",
         rule_id="install-deployment-outcome",
         path="src/apm_cli/install/outcome.py",
