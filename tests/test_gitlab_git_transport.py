@@ -327,11 +327,17 @@ class TestFetchFileViaGitSparse:
 
     @patch("apm_cli.deps.git_file_transport.subprocess.run")
     def test_git_failure_raises_runtime_error(self, mock_run: Mock, tmp_path: Path) -> None:
-        """RuntimeError is raised when a git command fails."""
+        """Git failures redact URL and Authorization credentials."""
         from apm_cli.deps.git_file_transport import fetch_file_via_git_sparse
 
+        secret = "sparse-error-secret"
         mock_run.return_value = Mock(
-            returncode=128, stderr="fatal: not a git repository", stdout=""
+            returncode=128,
+            stderr=(
+                f"trace: Authorization: Basic {secret}\n"
+                f"fatal: denied https://{secret}@gitlab.example.com/g/r.git"
+            ),
+            stdout="",
         )
 
         work_parent = tmp_path / "fetch5"
@@ -342,7 +348,7 @@ class TestFetchFileViaGitSparse:
                 "apm_cli.deps.git_file_transport.tempfile.TemporaryDirectory",
                 return_value=_FakeTemporaryDirectory(work_parent),
             ),
-            pytest.raises(RuntimeError, match="git file fetch failed"),
+            pytest.raises(RuntimeError, match="git file fetch failed") as raised,
         ):
             fetch_file_via_git_sparse(
                 _make_gitlab_dep(),
@@ -351,6 +357,10 @@ class TestFetchFileViaGitSparse:
                 build_repo_url_fn=lambda *a, **kw: "https://gitlab.example.com/g/r.git",
                 git_env={},
             )
+
+        message = str(raised.value)
+        assert secret not in message
+        assert "Authorization: ******" in message
 
     @patch("apm_cli.deps.git_file_transport.subprocess.run")
     def test_git_timeout_raises_transport_runtime_error(

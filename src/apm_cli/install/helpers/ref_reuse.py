@@ -19,7 +19,13 @@ if TYPE_CHECKING:
     from apm_cli.deps.transport_selection import ProtocolPreference, TransportSelector
     from apm_cli.models.dependency.reference import DependencyReference
 
-RefResolverCacheKey = tuple[str | None, str | None, str, tuple[str, str | None, int | None]]
+RefResolverCacheKey = tuple[
+    str | None,
+    str | None,
+    str,
+    tuple[str, str | None, int | None, bool],
+]
+_UNRESOLVED_AUTH_CONTEXT = object()
 
 
 def _token_fingerprint(token: str | None) -> str | None:
@@ -38,6 +44,10 @@ def _token_fingerprint(token: str | None) -> str | None:
 def resolve_dep_auth(
     dep_ref: Any,
     auth_resolver: Any,
+    *,
+    remote_url: str | None = None,
+    unauth_first: bool = False,
+    resolved_context: Any = _UNRESOLVED_AUTH_CONTEXT,
 ) -> tuple[str | None, str, dict[str, str] | None]:
     """Resolve per-dependency authentication for use by ``git ls-remote``.
 
@@ -50,15 +60,46 @@ def resolve_dep_auth(
     if auth_resolver is None:
         return None, "basic", None
     try:
-        auth_ctx = auth_resolver.resolve_for_dep(dep_ref)
+        if unauth_first:
+            return (
+                None,
+                "basic",
+                auth_resolver.build_public_github_anonymous_git_env(),
+            )
+        auth_ctx = (
+            auth_resolver.resolve_for_dep(dep_ref)
+            if resolved_context is _UNRESOLVED_AUTH_CONTEXT
+            else resolved_context
+        )
         if auth_ctx is None:
             return None, "basic", None
-        harden = getattr(auth_resolver, "hardened_git_env_for_context", None)
-        git_env = harden(auth_ctx) if callable(harden) else getattr(auth_ctx, "git_env", None)
-        if not auth_ctx.token:
+        remote_env_builder = getattr(auth_resolver, "git_env_for_remote", None)
+        if remote_url is not None and callable(remote_env_builder):
+            git_env = remote_env_builder(auth_ctx, remote_url)
+            from apm_cli.core.host_providers import git_transport_policy
+
+            host_kind = getattr(getattr(auth_ctx, "host_info", None), "kind", None)
+            if not isinstance(host_kind, str):
+                classify = getattr(auth_resolver, "classify_host", None)
+                host_kind = (
+                    classify(
+                        dep_ref.host or "github.com",
+                        port=dep_ref.port,
+                        host_type=dep_ref.host_type,
+                    ).kind
+                    if callable(classify)
+                    else "github"
+                )
+            policy = git_transport_policy(host_kind, remote_url)
+            token = auth_ctx.token if policy.use_resolved_credentials else None
+        else:
+            harden = getattr(auth_resolver, "hardened_git_env_for_context", None)
+            git_env = harden(auth_ctx) if callable(harden) else getattr(auth_ctx, "git_env", None)
+            token = auth_ctx.token
+        if not token:
             return None, "basic", git_env
         return (
-            auth_ctx.token,
+            token,
             auth_ctx.auth_scheme,
             git_env,
         )
@@ -128,7 +169,6 @@ def maybe_resolve_git_semver(
 
     from apm_cli.deps.git_semver_resolver import GitSemverResolver
 
-    token, auth_scheme, git_env = resolve_dep_auth(dep_ref, auth_resolver)
     if transport_selector is None:
         from apm_cli.deps.transport_selection import (
             NoOpInsteadOfResolver,
@@ -143,6 +183,34 @@ def maybe_resolve_git_semver(
     rewrite_candidate = dep_ref.to_github_url()
     if not dep_ref.is_azure_devops() and not rewrite_candidate.endswith(".git"):
         rewrite_candidate = f"{rewrite_candidate}.git"
+    anonymous_selector = (
+        getattr(auth_resolver, "uses_public_github_anonymous_first", None)
+        if auth_resolver is not None
+        else None
+    )
+    anonymous_first = bool(
+        not dep_ref.is_insecure
+        and callable(anonymous_selector)
+        and anonymous_selector(
+            dep_ref.host or "github.com",
+            port=dep_ref.port,
+            host_type=dep_ref.host_type,
+        )
+        is True
+    )
+    resolved_context: Any = None
+    if auth_resolver is not None and not anonymous_first:
+        try:
+            resolved_context = auth_resolver.resolve_for_dep(dep_ref)
+        except Exception:
+            resolved_context = None
+    token, _, _ = resolve_dep_auth(
+        dep_ref,
+        auth_resolver,
+        remote_url=rewrite_candidate,
+        unauth_first=anonymous_first,
+        resolved_context=resolved_context,
+    )
     transport_plan = transport_selector.select(
         dep_ref=dep_ref,
         cli_pref=protocol_pref,
@@ -157,21 +225,20 @@ def maybe_resolve_git_semver(
         if selected_attempt.requested_url is not None
         else ("ssh" if selected_scheme == "ssh" else "https")
     )
-    resolver_token = None if selected_attempt.requested_url is not None else token
-    resolver_git_env = git_env
-    if selected_attempt.requested_url is not None:
-        from apm_cli.core.auth import AuthResolver
-        from apm_cli.utils.git_env import clear_git_platform_token_env
-
-        resolver_git_env = AuthResolver.build_noninteractive_git_env(
-            base_env=git_env or {},
-            host_kind=AuthResolver.classify_host(
-                dep_ref.host or "github.com",
-                port=dep_ref.port,
-                host_type=dep_ref.host_type,
-            ).kind,
-        )
-        clear_git_platform_token_env(resolver_git_env, remove=True)
+    policy_url = selected_attempt.effective_url or (
+        rewrite_candidate
+        if selected_scheme != "ssh"
+        else f"ssh://{dep_ref.host or 'github.com'}/{dep_ref.repo_url}"
+    )
+    resolver_token, auth_scheme, resolver_git_env = resolve_dep_auth(
+        dep_ref,
+        auth_resolver,
+        remote_url=policy_url,
+        unauth_first=anonymous_first,
+        resolved_context=resolved_context,
+    )
+    if not selected_attempt.use_token:
+        resolver_token = None
     ref_resolver = get_shared_ref_resolver(
         dep_ref.host,
         resolver_token,
@@ -184,6 +251,7 @@ def maybe_resolve_git_semver(
         transport_scheme=transport_scheme,
         ssh_user=dep_ref.ssh_user or "git",
         port=dep_ref.port,
+        unauth_first=anonymous_first,
     )
     return GitSemverResolver(ref_resolver).resolve(
         owner_repo=owner_repo,
@@ -213,6 +281,7 @@ def get_shared_ref_resolver(
     transport_scheme: str = "https",
     ssh_user: str = "git",
     port: int | None = None,
+    unauth_first: bool = False,
 ) -> Any:
     """Return a transport-specific shared ``RefResolver`` for one auth context.
 
@@ -249,6 +318,8 @@ def get_shared_ref_resolver(
             auth_resolver=auth_resolver,
             auth_target=auth_target,
         )
+    if unauth_first:
+        resolver_kwargs["unauth_first"] = True
     if transport_scheme == "ssh":
         resolver_kwargs.update(
             transport_scheme=transport_scheme,
@@ -264,6 +335,7 @@ def get_shared_ref_resolver(
         transport_scheme,
         ssh_user if transport_scheme == "ssh" else None,
         port,
+        unauth_first,
     )
     key = (
         canonical_host,

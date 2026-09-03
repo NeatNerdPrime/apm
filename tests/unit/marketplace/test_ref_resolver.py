@@ -335,6 +335,37 @@ class TestRefResolver:
         resolver.close()
 
     @patch("apm_cli.marketplace.ref_resolver.subprocess.run")
+    def test_anonymous_first_retries_with_resolved_auth(self, mock_run: MagicMock) -> None:
+        mock_run.side_effect = (
+            _make_completed(returncode=128, stderr="authentication required"),
+            _make_completed(stdout=_MOCK_LS_REMOTE_OUTPUT),
+        )
+        auth_resolver = MagicMock()
+
+        def try_with_fallback(_target, operation, **kwargs):
+            assert kwargs["unauth_first"] is True
+            assert kwargs["base_env"] == {"BASE": "1"}
+            with pytest.raises(RuntimeError, match="authentication required"):
+                operation(None, {"ATTEMPT": "anonymous"})
+            return operation("resolved-token", {"ATTEMPT": "authenticated"})
+
+        auth_resolver.try_with_fallback.side_effect = try_with_fallback
+        resolver = RefResolver(
+            timeout_seconds=5.0,
+            auth_resolver=auth_resolver,
+            git_env={"BASE": "1"},
+            unauth_first=True,
+        )
+
+        refs = resolver.list_remote_refs("acme/tools")
+
+        assert len(refs) == 3
+        assert mock_run.call_count == 2
+        assert mock_run.call_args_list[0].kwargs["env"]["ATTEMPT"] == "anonymous"
+        assert mock_run.call_args_list[1].kwargs["env"]["ATTEMPT"] == "authenticated"
+        resolver.close()
+
+    @patch("apm_cli.marketplace.ref_resolver.subprocess.run")
     def test_cache_hit(self, mock_run: MagicMock) -> None:
         mock_run.return_value = _make_completed(stdout=_MOCK_LS_REMOTE_OUTPUT)
         resolver = RefResolver(timeout_seconds=5.0)

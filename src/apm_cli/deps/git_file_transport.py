@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..utils.git_env import git_no_hooks_args
+from ..utils.git_env import git_no_hooks_args, git_no_templates_args
 from ..utils.path_security import ensure_path_within, validate_path_segments
 
 if TYPE_CHECKING:
@@ -63,12 +63,6 @@ def _debug(message: str) -> None:
     """Print debug message if APM_DEBUG environment variable is set."""
     if os.environ.get("APM_DEBUG"):
         print(f"[DEBUG] {message}", file=sys.stderr)
-
-
-def _redact_git_stderr(stderr: str) -> str:
-    """Redact auth-bearing HTTPS URL credentials from git stderr."""
-    cleaned = stderr.strip()
-    return re.sub(r"(https?://)[^/@\s]+@", r"\1***@", cleaned)
 
 
 class GitSparseFileTransport:
@@ -188,7 +182,7 @@ class GitSparseFileTransport:
                 self._dep_ref.repo_url,
                 dep_ref=self._dep_ref,
             )
-            self._run(["git", "init"])
+            self._run(["git", "init", *git_no_templates_args()])
             from ..utils.git_env import git_network_env
 
             self._git_env = git_network_env(
@@ -227,7 +221,7 @@ class GitSparseFileTransport:
 
     def _run(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
         """Run one git command and raise a sanitized error on failure."""
-        from ..utils.git_env import git_subprocess_env
+        from ..utils.git_env import git_subprocess_env, redact_git_diagnostic
 
         try:
             result = subprocess.run(
@@ -241,7 +235,7 @@ class GitSparseFileTransport:
         except subprocess.TimeoutExpired as exc:
             raise GitFileTransportError(f"git file fetch timed out: {' '.join(cmd[:3])}") from exc
         if result.returncode != 0:
-            safe_stderr = _redact_git_stderr(result.stderr)
+            safe_stderr = redact_git_diagnostic(result.stderr.strip())
             raise GitFileTransportError(
                 f"git file fetch failed: {' '.join(cmd[:3])}: {safe_stderr}"
             )

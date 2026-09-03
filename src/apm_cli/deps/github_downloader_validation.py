@@ -657,13 +657,18 @@ def _path_exists_in_tree_at_ref(
     try:
         bare = tmpdir / "probe.git"
         bare.mkdir()
-        from ..utils.git_env import get_git_executable, git_network_env, git_subprocess_env
+        from ..utils.git_env import (
+            get_git_executable,
+            git_network_env,
+            git_no_templates_args,
+            git_subprocess_env,
+        )
 
         git_exe = get_git_executable()
         probe_env = git_subprocess_env(env)
         try:
             subprocess.run(
-                [git_exe, "init", "--bare", str(bare)],
+                [git_exe, "init", *git_no_templates_args(), "--bare", str(bare)],
                 check=True,
                 capture_output=True,
                 env=probe_env,
@@ -675,6 +680,7 @@ def _path_exists_in_tree_at_ref(
                 capture_output=True,
                 env=probe_env,
             )
+            remote_env = git_network_env(url, probe_env, git_dir=bare)
             # --filter=tree:0 keeps the fetch payload tiny: we get the
             # commit + a single tree object, no blob contents.
             subprocess.run(
@@ -690,7 +696,7 @@ def _path_exists_in_tree_at_ref(
                 ],
                 check=True,
                 capture_output=True,
-                env=probe_env,
+                env=remote_env,
             )
         except (subprocess.CalledProcessError, OSError) as exc:
             log(
@@ -705,7 +711,7 @@ def _path_exists_in_tree_at_ref(
                 check=True,
                 capture_output=True,
                 text=True,
-                env=probe_env,
+                env=remote_env,
             )
             output = result.stdout
         except (subprocess.CalledProcessError, OSError) as exc:

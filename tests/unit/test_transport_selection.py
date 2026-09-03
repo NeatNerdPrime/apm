@@ -205,6 +205,21 @@ class TestShorthandWithInsteadOf:
         assert plan.attempts[0].use_token is False
         assert plan.attempts[0].requested_url == candidate
 
+    def test_rewrite_deduplicates_equivalent_web_fallbacks(self):
+        candidate = "https://github.com/owner/repo"
+        plan = TransportSelector(
+            insteadof_resolver=FakeInsteadOfResolver({"https://github.com/": "git@github.com:"})
+        ).select(
+            dep_ref=_dep("owner/repo"),
+            allow_fallback=True,
+            has_token=True,
+            candidate_url=candidate,
+        )
+
+        assert _scheme_labels(plan) == ["ssh"]
+        assert plan.strict is True
+        assert "git config --show-origin" in (plan.fallback_hint or "")
+
     def test_no_insteadof_defaults_to_https_strict(self):
         sel = TransportSelector(insteadof_resolver=FakeInsteadOfResolver())
         plan = sel.select(

@@ -40,8 +40,11 @@
       "guards": [
         "transport-platform-git-child-environment",
         "transport-platform-git-clone-hooks-disabled",
+        "transport-platform-git-clone-templates-disabled",
+        "transport-platform-git-diagnostic-redaction",
         "transport-platform-git-single-remote-fetch",
         "transport-platform-git-url-credentials-out-of-argv",
+        "transport-platform-git-url-header-specificity",
         "transport-platform-git-url-rewrite-enforcement",
         "transport-platform-git-url-rewrite-once",
         "transport-platform-git-url-rewrite-routing",
@@ -88,7 +91,10 @@
       "decision": "Git semver preflight eligibility and resolution",
       "owner": "install/helpers/ref_reuse.py (is_git_semver_resolution_eligible / maybe_resolve_git_semver)",
       "selectors": ["src/apm_cli/install/helpers/ref_reuse.py"],
-      "guards": ["transport-platform-git-semver-preflight"]
+      "guards": [
+        "transport-platform-git-semver-preflight",
+        "transport-platform-git-semver-remote-auth"
+      ]
     },
     {
       "id": "network-host-loopback-classification",

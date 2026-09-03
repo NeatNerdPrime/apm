@@ -33,6 +33,11 @@ FALLBACK_HINT = (
     "--allow-protocol-fallback, set APM_ALLOW_PROTOCOL_FALLBACK=1, "
     "or run: apm config set allow-protocol-fallback true"
 )
+REWRITE_FALLBACK_HINT = (
+    "Git URL configuration rewrites every web attempt to the same transport. "
+    "Inspect matching rules with "
+    "'git config --show-origin --get-regexp ^url\\..*\\.insteadOf$'."
+)
 
 
 class ProtocolPreference(Enum):
@@ -238,6 +243,42 @@ def _rewrite_attempt(
     )
 
 
+def _rewrite_web_attempts(
+    attempts: list[TransportAttempt],
+    *,
+    requested_url: str | None,
+    effective_url: str | None,
+) -> list[TransportAttempt]:
+    """Apply one web-URL rewrite to every web fallback attempt."""
+    return [
+        (
+            _rewrite_attempt(
+                attempt,
+                requested_url=requested_url,
+                effective_url=effective_url,
+            )
+            if attempt.scheme in {"http", "https"}
+            else attempt
+        )
+        for attempt in attempts
+    ]
+
+
+def _permissive_plan(
+    initial: list[TransportAttempt],
+    chained: list[TransportAttempt],
+) -> TransportPlan:
+    """Return a deduplicated fallback plan with rewrite-aware diagnostics."""
+    attempts = _dedup_attempts(initial + chained)
+    if len(attempts) == 1 and attempts[0].effective_url is not None:
+        return TransportPlan(
+            attempts=attempts,
+            strict=True,
+            fallback_hint=REWRITE_FALLBACK_HINT,
+        )
+    return TransportPlan(attempts=attempts, strict=False, fallback_hint=None)
+
+
 class TransportSelector:
     """Pure decision engine. Maps inputs to a :class:`TransportPlan`.
 
@@ -290,6 +331,13 @@ class TransportSelector:
                 )
             )
         rewrite = self._resolver.resolve(candidate) if candidate is not None else None
+        web_candidate = candidate
+        web_rewrite = rewrite
+        if candidate is not None and urlsplit(candidate).scheme.lower() not in {"http", "https"}:
+            web_candidate = dep_ref.to_github_url()
+            if not dep_ref.is_azure_devops() and not web_candidate.endswith(".git"):
+                web_candidate = f"{web_candidate}.git"
+            web_rewrite = self._resolver.resolve(web_candidate)
 
         # 1. Explicit scheme on the URL wins for the initial attempt.
         #    In strict mode (default) the plan contains exactly that one attempt.
@@ -313,6 +361,11 @@ class TransportSelector:
                     effective_url=rewrite,
                 )
             ]
+            chained = _rewrite_web_attempts(
+                chained,
+                requested_url=web_candidate,
+                effective_url=web_rewrite,
+            )
 
             if not allow_fallback:
                 return TransportPlan(
@@ -321,11 +374,7 @@ class TransportSelector:
                     fallback_hint=FALLBACK_HINT,
                 )
 
-            return TransportPlan(
-                attempts=_dedup_attempts(initial + chained),
-                strict=False,
-                fallback_hint=None,
-            )
+            return _permissive_plan(initial, chained)
 
         # 2. Shorthand (no explicit scheme). Consult the CLI preference and git
         #    insteadOf rewrites to pick the initial protocol.
@@ -347,6 +396,11 @@ class TransportSelector:
                 effective_url=rewrite,
             )
         ]
+        chained = _rewrite_web_attempts(
+            chained,
+            requested_url=web_candidate,
+            effective_url=web_rewrite,
+        )
 
         if not allow_fallback:
             return TransportPlan(
@@ -356,8 +410,4 @@ class TransportSelector:
             )
 
         # Permissive: append the chain, dedup while preserving order.
-        return TransportPlan(
-            attempts=_dedup_attempts(initial + chained),
-            strict=False,
-            fallback_hint=None,
-        )
+        return _permissive_plan(initial, chained)

@@ -18,6 +18,13 @@ HTTPS request to another origin. Inspect rejected rules with:
 git config --show-origin --get-regexp '^url\..*\.insteadOf$'
 ```
 
+APM snapshots effective global and system Git config, validates every indexed
+rewrite value, passes the snapshot to the child process, and disables later
+reads from mutable global and system files. Repository-local config is used
+only in APM-owned caches and worktrees and is revalidated before remote use.
+Dependency clone and init commands ignore Git templates, and checkout hooks
+remain disabled.
+
 When fallback is required, APM checks these sources in order:
 
 | Priority | Variable | Scope | Notes |

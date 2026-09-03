@@ -380,7 +380,7 @@ class GitCache:
 
         Returns the path to the bare repo directory.
         """
-        from ..utils.git_env import get_git_executable, git_clone_env
+        from ..utils.git_env import get_git_executable, git_clone_env, git_no_templates_args
 
         bare_shard = shard_key + (_PARTIAL_BARE_SUFFIX if partial else "")
         bare_dir = self._db_root / bare_shard
@@ -415,6 +415,7 @@ class GitCache:
                 git_exe,
                 *_safe_git_args(),
                 "clone",
+                *git_no_templates_args(),
                 "--bare",
                 "--no-tags",
                 "--no-recurse-submodules",
@@ -468,6 +469,7 @@ class GitCache:
                                 git_exe,
                                 *_safe_git_args(),
                                 "clone",
+                                *git_no_templates_args(),
                                 "--bare",
                                 "--no-tags",
                                 "--no-recurse-submodules",
@@ -559,7 +561,12 @@ class GitCache:
         get the lock and return immediately. Critical for CI matrix
         builds where multiple jobs hit the same uncached repo.
         """
-        from ..utils.git_env import get_git_executable, git_network_env, git_subprocess_env
+        from ..utils.git_env import (
+            get_git_executable,
+            git_network_env,
+            git_no_templates_args,
+            git_subprocess_env,
+        )
 
         bare_shard = shard_key + (_PARTIAL_BARE_SUFFIX if promisor_url else "")
         bare_dir = self._db_root / bare_shard
@@ -620,6 +627,7 @@ class GitCache:
                         git_exe,
                         *_safe_git_args(),
                         "clone",
+                        *git_no_templates_args(),
                         "--local",
                         "--shared",
                         "--no-checkout",

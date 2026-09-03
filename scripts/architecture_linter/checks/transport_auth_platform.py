@@ -50,8 +50,11 @@ from scripts.architecture_linter.models import Rule, Violation
 _RID_HOST_CRED = "transport-platform-host-credential-resolution"
 _RID_GIT_CHILD_ENV = "transport-platform-git-child-environment"
 _RID_GIT_CLONE_HOOKS = "transport-platform-git-clone-hooks-disabled"
+_RID_GIT_CLONE_TEMPLATES = "transport-platform-git-clone-templates-disabled"
+_RID_GIT_DIAGNOSTIC = "transport-platform-git-diagnostic-redaction"
 _RID_GIT_SINGLE_REMOTE = "transport-platform-git-single-remote-fetch"
 _RID_GIT_URL_CREDENTIALS = "transport-platform-git-url-credentials-out-of-argv"
+_RID_GIT_URL_HEADER = "transport-platform-git-url-header-specificity"
 _RID_GIT_URL_ENFORCEMENT = "transport-platform-git-url-rewrite-enforcement"
 _RID_GIT_URL_ONCE = "transport-platform-git-url-rewrite-once"
 _RID_GIT_URL_ROUTING = "transport-platform-git-url-rewrite-routing"
@@ -345,7 +348,9 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 "def git_clone_env(",
                 "def init_git_remote_worktree(",
                 "def git_no_hooks_args(",
+                "def git_no_templates_args(",
                 "def git_remote_refs(",
+                "def redact_git_diagnostic(",
                 "def clear_git_auth_env(",
                 "def clear_git_platform_token_env(",
                 "def set_git_authorization_header(",
@@ -356,11 +361,37 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 "effective_url, snapshot = _validated_git_url_rewrite_policy(",
                 'env["GIT_TRACE_REDACT"] = "1"',
                 "_REMOTE_HELPER_RE",
+                '"--get-urlmatch"',
                 "clone_env = git_clone_env(",
                 'return "-c", "core.hooksPath=/dev/null"',
+                'return ("--template=",)',
                 "def validate_git_url_rewrite_safety(",
             ),
             "utils/git_env.py must own repository-state and URL rewrite safety",
+        )
+    )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            "src/apm_cli/deps/git_file_transport.py",
+            (
+                "from ..utils.git_env import git_subprocess_env, redact_git_diagnostic",
+                "safe_stderr = redact_git_diagnostic(result.stderr.strip())",
+            ),
+            "Sparse Git errors must route through canonical credential redaction",
+        )
+    )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            _src_python(provider, exclude={"src/apm_cli/utils/git_env.py"}),
+            re.compile(r"^\s*def _?redact_git_stderr\("),
+            "Git diagnostic credential redaction must stay owned by utils/git_env.py",
+            exempt=False,
         )
     )
     findings.extend(
@@ -417,6 +448,22 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 "Dependency Git checkouts must disable repository-controlled hooks",
             )
         )
+    for path in (
+        "src/apm_cli/cache/git_cache.py",
+        "src/apm_cli/deps/bare_cache.py",
+        "src/apm_cli/deps/git_file_transport.py",
+        "src/apm_cli/deps/github_downloader_validation.py",
+    ):
+        findings.extend(
+            _require_subs(
+                provider,
+                inv,
+                _RID_GIT_CHILD_ENV,
+                path,
+                ("git_no_templates_args(",),
+                "Dependency Git repositories must suppress template-provided config",
+            )
+        )
     findings.extend(
         _forbid_scan(
             provider,
@@ -425,6 +472,17 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
             _src_python(provider, exclude={"src/apm_cli/utils/git_env.py"}),
             re.compile(r"core\.hooksPath=/dev/null"),
             "Git hook suppression must route through utils/git_env.git_no_hooks_args",
+            exempt=False,
+        )
+    )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            _src_python(provider, exclude={"src/apm_cli/utils/git_env.py"}),
+            re.compile(r"""["']--template=["']"""),
+            "Git template suppression must route through utils/git_env.git_no_templates_args",
             exempt=False,
         )
     )
@@ -975,8 +1033,11 @@ RULES: tuple[Rule, ...] = (
         guard_ids=(
             _RID_GIT_CHILD_ENV,
             _RID_GIT_CLONE_HOOKS,
+            _RID_GIT_CLONE_TEMPLATES,
+            _RID_GIT_DIAGNOSTIC,
             _RID_GIT_SINGLE_REMOTE,
             _RID_GIT_URL_CREDENTIALS,
+            _RID_GIT_URL_HEADER,
             _RID_GIT_URL_ENFORCEMENT,
             _RID_GIT_URL_ONCE,
             _RID_GIT_URL_ROUTING,

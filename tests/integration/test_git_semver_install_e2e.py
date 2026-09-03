@@ -776,23 +776,22 @@ class TestLiteralRefUnchanged:
 
 
 # ---------------------------------------------------------------------------
-# Promise H: AuthResolver token threads into RefResolver for private repos
+# Promise H: RefResolver owns public GitHub anonymous-first auth fallback
 # ---------------------------------------------------------------------------
 
 
-class TestAuthTokenThreadedToLsRemote:
-    def test_github_apm_pat_reaches_ref_resolver_for_semver_dep(
+class TestAuthFallbackThreadedToLsRemote:
+    def test_github_semver_defers_pat_until_anonymous_failure(
         self,
         runner: CliRunner,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Regression-trap for the auth-blocking panel finding on PR #1496.
+        """Regression-trap for semver's public GitHub auth fallback.
 
-        With ``GITHUB_APM_PAT`` set, an ``apm install`` of a semver-range
-        git-source dep must pass that token to the ``RefResolver`` that
-        runs ``git ls-remote`` -- otherwise private repos fail in CI
-        environments without a system git credential helper.
+        The resolver receives AuthResolver and starts without eagerly resolving
+        ``GITHUB_APM_PAT``. A unit regression test covers its authenticated retry
+        after an auth-shaped anonymous failure.
         """
         monkeypatch.setenv("GITHUB_APM_PAT", "ghp_e2e_token_abc123")
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -808,13 +807,11 @@ class TestAuthTokenThreadedToLsRemote:
         result = _run_install(runner, project, monkeypatch)
         assert result.exit_code == 0, result.output
 
-        # At least one RefResolver instance must have been constructed
-        # with the configured PAT.
-        tokens_seen = [kw.get("token") for kw in rr.init_kwargs]
-        assert "ghp_e2e_token_abc123" in tokens_seen, (
-            "AuthResolver did not thread GITHUB_APM_PAT into the "
-            f"RefResolver used for ls-remote. token kwargs seen: {tokens_seen}"
-        )
+        assert rr.init_kwargs
+        resolver_kwargs = rr.init_kwargs[0]
+        assert resolver_kwargs.get("token") is None
+        assert resolver_kwargs.get("unauth_first") is True
+        assert resolver_kwargs.get("auth_resolver") is not None
 
 
 # ---------------------------------------------------------------------------

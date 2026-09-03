@@ -467,6 +467,81 @@ class TestGitSubprocessEnv:
 
         assert "clone" in run.call_args_list[-1].args[0]
 
+    @pytest.mark.parametrize("specific_first", (True, False))
+    def test_specific_empty_header_overrides_global_authorization(
+        self,
+        tmp_path,
+        specific_first: bool,
+    ) -> None:
+        specific = '[http "https://mirror.example/"]\n\textraHeader =\n'
+        global_header = "[http]\n\textraHeader = Authorization: Basic sentinel\n"
+        config = tmp_path / "gitconfig"
+        config.write_text(
+            '[url "https://mirror.example/"]\n'
+            "\tinsteadOf = https://git.example.com/\n"
+            f"{specific if specific_first else global_header}"
+            f"{global_header if specific_first else specific}",
+            encoding="ascii",
+        )
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_GLOBAL": str(config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ) as run,
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+        assert "clone" in run.call_args_list[-1].args[0]
+
+    @pytest.mark.parametrize("specific_first", (True, False))
+    def test_specific_authorization_overrides_empty_global_header(
+        self,
+        tmp_path,
+        specific_first: bool,
+    ) -> None:
+        specific = (
+            '[http "https://mirror.example/"]\n\textraHeader = Authorization: Basic sentinel\n'
+        )
+        global_reset = "[http]\n\textraHeader =\n"
+        config = tmp_path / "gitconfig"
+        config.write_text(
+            '[url "https://mirror.example/"]\n'
+            "\tinsteadOf = https://git.example.com/\n"
+            f"{specific if specific_first else global_reset}"
+            f"{global_reset if specific_first else specific}",
+            encoding="ascii",
+        )
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_GLOBAL": str(config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ),
+            pytest.raises(GitUrlRewriteError, match="different HTTPS origin"),
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
     def test_clone_rejects_rewrite_of_credential_bearing_remote(self, tmp_path) -> None:
         token = "source-token-sentinel"
         env = {

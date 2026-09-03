@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "src"))
 
+from apm_cli.core.auth import AuthResolver
 from apm_cli.deps.transport_selection import (
     ProtocolPreference,
     TransportAttempt,
@@ -156,7 +157,10 @@ def test_rewritten_semver_preserves_requested_url_for_git() -> None:
     with (
         patch(
             "apm_cli.install.helpers.ref_reuse.resolve_dep_auth",
-            return_value=("semver-token", "basic", token_env),
+            side_effect=[
+                ("semver-token", "basic", token_env),
+                (None, "basic", {"CLEAN": "1"}),
+            ],
         ),
         patch("apm_cli.marketplace.ref_resolver.RefResolver", fake_ref),
         patch("apm_cli.deps.git_semver_resolver.GitSemverResolver", fake_semver),
@@ -172,9 +176,131 @@ def test_rewritten_semver_preserves_requested_url_for_git() -> None:
     assert selector.select.call_args.kwargs["candidate_url"] == "https://github.com/owner/repo.git"
     assert fake_semver.return_value.resolve.call_args.kwargs["remote_url"] == requested
     child_env = fake_ref.call_args.kwargs["git_env"]
-    assert "GIT_TOKEN" not in child_env
-    assert "GITHUB_TOKEN" not in child_env
-    assert not _authorization_config_values(child_env)
+    assert child_env == {"CLEAN": "1"}
+
+
+def test_same_origin_https_rewrite_preserves_managed_auth() -> None:
+    """A rewritten HTTPS semver request keeps its selected GitHub credential."""
+    dep = _semver_dep("owner/repo", "packages/a")
+    requested = "https://github.com/owner/repo.git"
+    selector = MagicMock()
+    selector.select.return_value = TransportPlan(
+        attempts=[
+            TransportAttempt(
+                scheme="https",
+                use_token=True,
+                label="Git URL rewrite (https)",
+                requested_url=requested,
+                effective_url="https://github.com/mirror/repo.git",
+            )
+        ],
+        strict=True,
+    )
+    context = SimpleNamespace(
+        token="semver-token",
+        auth_scheme="basic",
+        host_info=SimpleNamespace(kind="github"),
+    )
+    auth_resolver = MagicMock()
+    auth_resolver.uses_public_github_anonymous_first.return_value = False
+    auth_resolver.resolve_for_dep.return_value = context
+    auth_resolver.git_env_for_remote.side_effect = lambda ctx, _url: (
+        AuthResolver.git_env_for_context(ctx, base_env={})
+    )
+    fake_semver = MagicMock()
+    fake_semver.return_value.resolve.return_value = "RESOLUTION"
+    fake_ref = MagicMock()
+
+    with (
+        patch("apm_cli.marketplace.ref_resolver.RefResolver", fake_ref),
+        patch("apm_cli.deps.git_semver_resolver.GitSemverResolver", fake_semver),
+    ):
+        result = maybe_resolve_git_semver(
+            dep_ref=dep,
+            existing_lockfile=None,
+            update_refs=True,
+            auth_resolver=auth_resolver,
+            transport_selector=selector,
+        )
+
+    assert result == "RESOLUTION"
+    assert fake_ref.call_args.kwargs["token"] == "semver-token"
+    assert _authorization_config_values(fake_ref.call_args.kwargs["git_env"])
+    assert fake_semver.return_value.resolve.call_args.kwargs["remote_url"] == requested
+
+
+def test_generic_https_semver_preserves_native_helper() -> None:
+    """Generic semver resolution keeps a helper and never promotes its credential."""
+    dep = _semver_dep("owner/repo", "packages/a")
+    dep.host = "git.example.com"
+    candidate = "https://git.example.com/owner/repo.git"
+    selector = MagicMock()
+    selector.select.return_value = TransportPlan(
+        attempts=[TransportAttempt(scheme="https", use_token=False, label="plain HTTPS")],
+        strict=True,
+    )
+    context = SimpleNamespace(
+        token="helper-credential",
+        auth_scheme="basic",
+        host_info=SimpleNamespace(kind="generic"),
+    )
+    helper_env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "fixture-helper",
+    }
+    auth_resolver = MagicMock()
+    auth_resolver.uses_public_github_anonymous_first.return_value = False
+    auth_resolver.resolve_for_dep.return_value = context
+    auth_resolver.git_env_for_remote.return_value = helper_env
+    fake_semver = MagicMock()
+    fake_semver.return_value.resolve.return_value = "RESOLUTION"
+    fake_ref = MagicMock()
+
+    with (
+        patch("apm_cli.marketplace.ref_resolver.RefResolver", fake_ref),
+        patch("apm_cli.deps.git_semver_resolver.GitSemverResolver", fake_semver),
+    ):
+        result = maybe_resolve_git_semver(
+            dep_ref=dep,
+            existing_lockfile=None,
+            update_refs=True,
+            auth_resolver=auth_resolver,
+            transport_selector=selector,
+        )
+
+    assert result == "RESOLUTION"
+    assert selector.select.call_args.kwargs["candidate_url"] == candidate
+    assert fake_ref.call_args.kwargs["token"] is None
+    assert fake_ref.call_args.kwargs["git_env"] == helper_env
+
+
+def test_public_github_semver_defers_auth_until_anonymous_failure() -> None:
+    """Public GitHub tag discovery preserves AuthResolver's anonymous-first chain."""
+    dep = _semver_dep("owner/repo", "packages/a")
+    auth_resolver = MagicMock()
+    auth_resolver.uses_public_github_anonymous_first.return_value = True
+    auth_resolver.build_public_github_anonymous_git_env.return_value = {"ANONYMOUS": "1"}
+    fake_semver = MagicMock()
+    fake_semver.return_value.resolve.return_value = "RESOLUTION"
+    fake_ref = MagicMock()
+
+    with (
+        patch("apm_cli.marketplace.ref_resolver.RefResolver", fake_ref),
+        patch("apm_cli.deps.git_semver_resolver.GitSemverResolver", fake_semver),
+    ):
+        result = maybe_resolve_git_semver(
+            dep_ref=dep,
+            existing_lockfile=None,
+            update_refs=True,
+            auth_resolver=auth_resolver,
+        )
+
+    assert result == "RESOLUTION"
+    auth_resolver.resolve_for_dep.assert_not_called()
+    assert fake_ref.call_args.kwargs["token"] is None
+    assert fake_ref.call_args.kwargs["git_env"] == {"ANONYMOUS": "1"}
+    assert fake_ref.call_args.kwargs["unauth_first"] is True
 
 
 def test_concurrent_same_repo_deps_share_one_resolver_under_lock():

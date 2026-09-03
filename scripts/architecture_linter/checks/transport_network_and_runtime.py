@@ -168,6 +168,7 @@ def _check_ref_freshness(provider: FactsProvider) -> tuple[Violation, ...]:
 
 
 _RID_SEMVER = "transport-platform-git-semver-preflight"
+_RID_SEMVER_AUTH = "transport-platform-git-semver-remote-auth"
 
 
 _REF_REUSE = "src/apm_cli/install/helpers/ref_reuse.py"
@@ -198,6 +199,10 @@ def _check_git_semver_preflight(provider: FactsProvider) -> tuple[Violation, ...
                 "candidate_url=rewrite_candidate",
                 "selected_attempt = transport_plan.attempts[0]",
                 "selected_attempt.requested_url is not None",
+                "uses_public_github_anonymous_first",
+                "remote_url=policy_url",
+                "if not selected_attempt.use_token:",
+                "unauth_first=anonymous_first",
                 "transport_scheme=transport_scheme",
             ),
             "ref_reuse must select transport through TransportSelector",
@@ -488,7 +493,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         id=_RID_SEMVER,
         group=GROUP,
-        guard_ids=(_RID_SEMVER,),
+        guard_ids=(_RID_SEMVER, _RID_SEMVER_AUTH),
         description="Git semver preflight eligibility and transport selection stay in ref_reuse.py.",
         check=_check_git_semver_preflight,
     ),

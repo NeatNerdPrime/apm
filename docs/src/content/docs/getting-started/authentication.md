@@ -43,6 +43,12 @@ git config --show-origin --get-regexp '^url\..*\.insteadOf$'
 
 APM evaluates clone rewrites without the invoking repository's local
 `.git/config`, because `git clone` does not consume that local config.
+It snapshots effective global and system Git config, validates every indexed
+rewrite value, passes the snapshot to the child process, and disables later
+reads from mutable global and system files. Repository-local config is
+considered only for APM-owned caches and worktrees and is revalidated before
+remote use. Dependency clone and init commands ignore Git templates, and
+checkout hooks remain disabled.
 
 ## Token lookup
 ### GitHub-class hosts (`github.com`, `*.ghe.com`, GHES via `GITHUB_HOST`)

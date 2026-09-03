@@ -206,6 +206,36 @@ def test_dependency_clone_disables_repository_checkout_hook(tmp_path: Path) -> N
     assert not marker.exists()
 
 
+def test_dependency_clone_ignores_template_url_rewrite(tmp_path: Path) -> None:
+    """Clone execution uses the same template-free config model as its probe."""
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init")
+    _git(source, "config", "user.email", "test@example.com")
+    _git(source, "config", "user.name", "Test")
+    _commit(source, "dependency\n", "dependency")
+    template = tmp_path / "template"
+    template.mkdir()
+    remote_url = source.as_uri()
+    (template / "config").write_text(
+        f'[url "http://127.0.0.1:9/"]\n\tinsteadOf = {remote_url}\n',
+        encoding="ascii",
+    )
+
+    target = tmp_path / "consumer"
+    clone_git_worktree(
+        remote_url,
+        target,
+        env={
+            "PATH": os.environ["PATH"],
+            "GIT_ALLOW_PROTOCOL": "file",
+            "GIT_TEMPLATE_DIR": str(template),
+        },
+    )
+
+    assert _git(target, "rev-parse", "HEAD") == _git(source, "rev-parse", "HEAD")
+
+
 def test_full_clone_fallback_replaces_poisoned_process_environment(tmp_path: Path) -> None:
     """Working-tree clone must replace, not overlay, the Git child environment."""
     source = tmp_path / "source"
@@ -315,6 +345,57 @@ def test_shallow_fetch_failure_keeps_cause_and_redacts_credentials(
     assert exists is False
     assert "fatal: denied" in output
     assert token not in output
+
+
+def test_shallow_tree_probe_ignores_remote_activated_template_rewrite(
+    tmp_path: Path,
+) -> None:
+    """The validation fetch cannot activate template configuration after origin."""
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init")
+    _git(source, "config", "user.email", "test@example.com")
+    _git(source, "config", "user.name", "Test")
+    _git(source, "branch", "-M", "main")
+    skill = source / "skills" / "demo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Demo\n", encoding="ascii")
+    _git(source, "add", ".")
+    _git(source, "commit", "-m", "seed")
+    remote_url = source.as_uri()
+
+    included = tmp_path / "included-gitconfig"
+    included.write_text(
+        f'[url "http://127.0.0.1:9/"]\n\tinsteadOf = {remote_url}\n',
+        encoding="ascii",
+    )
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "config").write_text(
+        f'[includeIf "hasconfig:remote.*.url:{remote_url}"]\n\tpath = {included.as_posix()}\n',
+        encoding="ascii",
+    )
+    downloader = GitHubPackageDownloader.__new__(GitHubPackageDownloader)
+    logs: list[str] = []
+
+    exists = _path_exists_in_tree_at_ref(
+        downloader,
+        DependencyReference(repo_url="owner/repo"),
+        "skills/demo",
+        "main",
+        logs.append,
+        AttemptSpec(
+            "fixture",
+            remote_url,
+            {
+                "PATH": os.environ["PATH"],
+                "GIT_ALLOW_PROTOCOL": "file",
+                "GIT_TEMPLATE_DIR": str(template),
+            },
+        ),
+    )
+
+    assert exists is True, logs
 
 
 def test_shared_bare_clone_rejects_unsafe_effective_rewrite(tmp_path: Path) -> None:

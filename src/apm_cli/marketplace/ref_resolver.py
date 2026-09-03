@@ -103,6 +103,14 @@ class RemoteRef:
     sha: str  # 40-char hex SHA
 
 
+class _RemoteAttemptError(RuntimeError):
+    """Carry one failed ls-remote result through AuthResolver fallback."""
+
+    def __init__(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.result = result
+        super().__init__(result.stderr or f"git ls-remote exited {result.returncode}")
+
+
 # ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
@@ -216,6 +224,7 @@ class RefResolver:
         transport_scheme: str = "https",
         ssh_user: str = "git",
         port: int | None = None,
+        unauth_first: bool = False,
     ) -> None:
         self._timeout = timeout_seconds
         self._offline = offline
@@ -229,6 +238,7 @@ class RefResolver:
         self._transport_scheme = transport_scheme
         self._ssh_user = ssh_user
         self._port = port
+        self._unauth_first = unauth_first
         self._cache = RefCache()
         self._lock = threading.Lock()
         # Per-remote locks to serialise calls to the same remote while
@@ -406,15 +416,43 @@ class RefResolver:
                 raise OfflineMissError(package="", remote=cache_key)
 
             url, env = self._git_url_and_env(owner_repo, remote_url=remote_url)
-            try:
+
+            def _run_remote(run_env: dict[str, str]) -> subprocess.CompletedProcess[str]:
                 from ..utils.git_env import git_remote_refs
 
-                result = git_remote_refs(
+                return git_remote_refs(
                     url,
                     timeout=self._timeout,
-                    env=env,
+                    env=run_env,
                     options=("--tags", "--heads"),
                 )
+
+            try:
+                if self._unauth_first and self._auth_resolver is not None:
+
+                    def _attempt(
+                        _token: str | None,
+                        attempt_env: dict[str, str],
+                    ) -> subprocess.CompletedProcess[str]:
+                        attempt = _run_remote(attempt_env)
+                        if attempt.returncode != 0:
+                            raise _RemoteAttemptError(attempt)
+                        return attempt
+
+                    try:
+                        result = self._auth_resolver.try_with_fallback(
+                            self._host,
+                            _attempt,
+                            org=owner_repo.partition("/")[0],
+                            port=self._port,
+                            path=owner_repo,
+                            unauth_first=True,
+                            base_env=self._git_env,
+                        )
+                    except _RemoteAttemptError as exc:
+                        result = exc.result
+                else:
+                    result = _run_remote(env)
             except subprocess.TimeoutExpired:
                 raise GitLsRemoteError(  # noqa: B904
                     package="",

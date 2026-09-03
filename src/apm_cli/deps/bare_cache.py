@@ -168,6 +168,7 @@ def bare_clone_with_fallback(
         get_git_executable,
         git_clone_env,
         git_network_env,
+        git_no_templates_args,
         git_subprocess_env,
     )
 
@@ -201,7 +202,7 @@ def bare_clone_with_fallback(
                 try:
                     env = git_network_env(url, env)
                     subprocess.run(
-                        [git_exe, "init", "--bare", str(target)],
+                        [git_exe, "init", *git_no_templates_args(), "--bare", str(target)],
                         env=env,
                         check=True,
                         capture_output=True,
@@ -241,7 +242,7 @@ def bare_clone_with_fallback(
                 _rmtree(target)
             env = git_clone_env(url, env, target, bare=True)
             subprocess.run(
-                [git_exe, "clone", "--bare", url, str(target)],
+                [git_exe, "clone", *git_no_templates_args(), "--bare", url, str(target)],
                 env=env,
                 check=True,
                 capture_output=True,
@@ -279,7 +280,7 @@ def bare_clone_with_fallback(
             return
 
         # Symbolic ref or default branch.
-        args = [git_exe, "clone", "--bare", "--depth=1"]
+        args = [git_exe, "clone", *git_no_templates_args(), "--bare", "--depth=1"]
         if ref:
             args += ["--branch", ref]
         args += [url, str(target)]
@@ -293,7 +294,7 @@ def bare_clone_with_fallback(
             _rmtree(target)
             env = git_clone_env(url, env, target, bare=True)
             subprocess.run(
-                [git_exe, "clone", "--bare", url, str(target)],
+                [git_exe, "clone", *git_no_templates_args(), "--bare", url, str(target)],
                 env=env,
                 check=True,
                 capture_output=True,
@@ -606,7 +607,12 @@ def materialize_from_bare(
         The resolved commit SHA. Caller threads this into
         ``resolved_commit`` for the lockfile.
     """
-    from ..utils.git_env import get_git_executable, git_no_hooks_args, git_subprocess_env
+    from ..utils.git_env import (
+        get_git_executable,
+        git_no_hooks_args,
+        git_no_templates_args,
+        git_subprocess_env,
+    )
 
     git_exe = get_git_executable()
     env = git_subprocess_env(env)
@@ -632,6 +638,7 @@ def materialize_from_bare(
             git_exe,
             *git_no_hooks_args(),
             "clone",
+            *git_no_templates_args(),
             "--local",
             "--shared",
             "--no-checkout",

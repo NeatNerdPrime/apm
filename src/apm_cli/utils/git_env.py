@@ -86,6 +86,7 @@ _GIT_CHILD_TOKEN_ENV_PREFIXES = (
     "GITHUB_APM_PAT_",
 )
 _AUTH_HEADER_RE = re.compile(r"(?im)(authorization:\s*)[^\r\n]+")
+_URL_USERINFO_RE = re.compile(r"(https?://)[^/@\s]+@")
 _REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 
 _URL_REWRITE_RECOVERY = (
@@ -198,9 +199,10 @@ def git_subprocess_env(overrides: dict[str, object] | None = None) -> dict[str, 
     return env
 
 
-def redact_git_auth_headers(text: str) -> str:
-    """Redact Authorization values from Git diagnostics."""
-    return _AUTH_HEADER_RE.sub(r"\1******", text)
+def redact_git_diagnostic(text: str) -> str:
+    """Redact URL userinfo and Authorization values from Git diagnostics."""
+    without_userinfo = _URL_USERINFO_RE.sub(r"\1***@", text)
+    return _AUTH_HEADER_RE.sub(r"\1******", without_userinfo)
 
 
 def git_subprocess_error_text(exc: BaseException) -> str:
@@ -210,8 +212,8 @@ def git_subprocess_error_text(exc: BaseException) -> str:
             if isinstance(stream, bytes):
                 stream = stream.decode("utf-8", errors="replace")
             if isinstance(stream, str) and stream.strip():
-                return redact_git_auth_headers(stream.strip())
-    return redact_git_auth_headers(str(exc))
+                return redact_git_diagnostic(stream.strip())
+    return redact_git_diagnostic(str(exc))
 
 
 def clear_git_platform_token_env(
@@ -258,6 +260,11 @@ def clear_git_auth_env(env: dict[str, str]) -> None:
 def git_no_hooks_args() -> tuple[str, str]:
     """Return the canonical per-command fence against repository Git hooks."""
     return "-c", "core.hooksPath=/dev/null"
+
+
+def git_no_templates_args() -> tuple[str]:
+    """Return the canonical clone fence against template-provided config."""
+    return ("--template=",)
 
 
 class _GitProgress(Protocol):
@@ -365,44 +372,57 @@ def _read_effective_git_config(
     return _GitConfigSnapshot(tuple(entries), tuple(rewrites), tuple(http_headers))
 
 
-def _http_extraheader_applies(key: str, remote_url: str) -> bool:
-    """Return whether one Git http.*.extraHeader key applies to a URL."""
-    normalized = key.lower()
-    if normalized == "http.extraheader":
-        return True
-    if not normalized.startswith("http.") or not normalized.endswith(".extraheader"):
-        return False
-    scoped_url = key[len("http.") : -len(".extraheader")]
-    try:
-        scoped = urlsplit(scoped_url)
-        remote = urlsplit(remote_url)
-        scoped_origin = _url_origin(scoped_url)
-        remote_origin = _url_origin(remote_url)
-    except ValueError:
-        return True
-    if scoped.scheme.lower() not in {"http", "https"} or not scoped.hostname:
-        return True
-    if scoped_origin != remote_origin:
-        return False
-    if scoped.username is not None and scoped.username != remote.username:
-        return False
-    scope_path = scoped.path.rstrip("/")
-    remote_path = remote.path.rstrip("/")
-    return not scope_path or remote_path == scope_path or remote_path.startswith(f"{scope_path}/")
-
-
 def _has_applicable_http_authorization(
     remote_url: str,
     headers: Sequence[GitConfigEntry],
     env: dict[str, str],
 ) -> bool:
-    """Return whether effective configuration sends an extra HTTP header."""
-    has_header = bool(env.get("GIT_HTTP_EXTRAHEADER", "").strip())
-    for entry in headers:
-        if not _http_extraheader_applies(entry.key, remote_url):
-            continue
-        has_header = bool(entry.value.strip())
-    return has_header
+    """Ask Git which URL-scoped extra headers apply to one remote."""
+    if env.get("GIT_HTTP_EXTRAHEADER", "").strip():
+        return True
+    if not headers:
+        return False
+
+    probe_env = git_subprocess_env(env)
+    probe_env.pop("GIT_CONFIG_PARAMETERS", None)
+    probe_env.pop("GIT_CONFIG_COUNT", None)
+    for key in tuple(probe_env):
+        if key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            probe_env.pop(key, None)
+    probe_env["GIT_CONFIG_NOSYSTEM"] = "1"
+    probe_env["GIT_CONFIG_SYSTEM"] = os.devnull
+    probe_env["GIT_CONFIG_GLOBAL"] = os.devnull
+    probe_env["GIT_CONFIG_COUNT"] = str(len(headers))
+    for index, entry in enumerate(headers):
+        probe_env[f"GIT_CONFIG_KEY_{index}"] = entry.key
+        probe_env[f"GIT_CONFIG_VALUE_{index}"] = entry.value
+
+    git_executable = get_git_executable()
+    try:
+        result = _git_config_run(
+            [
+                git_executable,
+                "config",
+                "--null",
+                "--get-urlmatch",
+                "http.extraHeader",
+                remote_url,
+            ],
+            capture_output=True,
+            check=False,
+            cwd=str(Path(git_executable).resolve().parent),
+            env=probe_env,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitUrlRewriteProbeError("Git URL-match probe timed out") from exc
+    except OSError as exc:
+        raise GitUrlRewriteProbeError("Git URL-match probe could not start") from exc
+    if result.returncode == 1:
+        return False
+    if result.returncode != 0 or not isinstance(result.stdout, bytes):
+        raise GitUrlRewriteProbeError("Git URL-match probe failed")
+    return any(value.strip() for value in result.stdout.split(b"\0"))
 
 
 def git_url_has_authorization(
@@ -717,7 +737,7 @@ def git_clone_env(
                     get_git_executable(),
                     "init",
                     *(("--bare",) if bare else ()),
-                    "--template=",
+                    *git_no_templates_args(),
                     "--quiet",
                     str(target),
                 ],
@@ -786,13 +806,13 @@ def git_remote_refs(
             check=check,
         )
         if isinstance(result.stderr, str):
-            result.stderr = redact_git_auth_headers(result.stderr)
+            result.stderr = redact_git_diagnostic(result.stderr)
         return result
     except subprocess.CalledProcessError as exc:
         if isinstance(exc.stderr, str):
-            exc.stderr = redact_git_auth_headers(exc.stderr)
+            exc.stderr = redact_git_diagnostic(exc.stderr)
         if isinstance(exc.stdout, str):
-            exc.stdout = redact_git_auth_headers(exc.stdout)
+            exc.stdout = redact_git_diagnostic(exc.stdout)
         raise
     except subprocess.TimeoutExpired:
         # auth-delegated: callers resolve credential and bearer policy before this executor.
@@ -810,7 +830,7 @@ def init_git_remote_worktree(
     git_executable = get_git_executable()
     child_env = git_subprocess_env(env)
     result = run(
-        [git_executable, "init"],
+        [git_executable, "init", *git_no_templates_args()],
         cwd=str(worktree),
         env=child_env,
         capture_output=True,
@@ -859,7 +879,12 @@ def clone_git_worktree(
     progress: _GitProgress | None = None,
 ) -> None:
     """Clone a working tree with a complete sanitized child environment."""
-    args = [get_git_executable(), *git_no_hooks_args(), "clone"]
+    args = [
+        get_git_executable(),
+        *git_no_hooks_args(),
+        "clone",
+        *git_no_templates_args(),
+    ]
     if progress is not None:
         args.append("--progress")
     if depth is not None:

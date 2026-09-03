@@ -11,6 +11,7 @@ import pytest
 from apm_cli.deps.bare_cache import build_clone_failure_message
 from apm_cli.deps.clone_engine import CloneEngine
 from apm_cli.deps.transport_selection import (
+    REWRITE_FALLBACK_HINT,
     ProtocolPreference,
     TransportAttempt,
     TransportPlan,
@@ -23,6 +24,7 @@ def _clone_failure_message(
     stderr: bytes,
     attempt_scheme: str,
     command_scheme: str | None = None,
+    fallback_hint: str | None = None,
 ) -> str:
     """Build a clone failure message for an SSH diagnostic scenario."""
     command_scheme = command_scheme or attempt_scheme
@@ -35,6 +37,7 @@ def _clone_failure_message(
             )
         ],
         strict=True,
+        fallback_hint=fallback_hint,
     )
     auth_resolver = MagicMock()
     auth_resolver.build_error_context.return_value = ""
@@ -64,6 +67,16 @@ def _clone_failure_message(
         last_attempt_scheme=attempt_scheme,
         sanitize_git_error=lambda value: value,
     )
+
+
+def test_clone_failure_message_preserves_rewrite_inspection_command() -> None:
+    message = _clone_failure_message(
+        stderr=b"fatal: connection refused\n",
+        attempt_scheme="ssh",
+        fallback_hint=REWRITE_FALLBACK_HINT,
+    )
+
+    assert "git config --show-origin --get-regexp" in message
 
 
 def test_clone_failure_message_explains_passphrase_protected_ssh_key() -> None:
