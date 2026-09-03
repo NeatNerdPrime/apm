@@ -402,12 +402,6 @@ class TestListRemoteRefs:
             token=None,
             auth_scheme="basic",
         )
-        host._build_repo_url.assert_any_call(
-            "owner/repo",
-            use_ssh=False,
-            dep_ref=dep,
-            token="",
-        )
         host._build_noninteractive_git_env.assert_called_once()
         host.auth_resolver.execute_with_bearer_fallback.assert_not_called()
         git_env = MockGit.return_value.ls_remote.call_args.kwargs["env"]

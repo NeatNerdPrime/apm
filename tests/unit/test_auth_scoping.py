@@ -7,6 +7,7 @@ Tests cover:
 """
 
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -979,12 +980,26 @@ class TestValidatePackageExistsEnv:
     )
     @patch("subprocess.run")
     @patch.dict(os.environ, {}, clear=True)
-    def test_generic_host_validation_allows_credential_helpers(self, mock_run, _mock_cred):
-        """git ls-remote for a generic host should NOT have GIT_ASKPASS=echo."""
+    def test_generic_host_validation_snapshots_credential_helpers(
+        self,
+        mock_run,
+        _mock_cred,
+    ):
+        """Generic HTTPS keeps helpers in an immutable Git config snapshot."""
         from apm_cli.commands.install import _validate_package_exists
 
         mock_run.return_value = Mock(returncode=0)
-        _validate_package_exists("git.example.com/acme/rules")
+        config_result = subprocess.CompletedProcess(
+            ["git", "config"],
+            0,
+            stdout=b"global\0credential.helper\nfixture-helper\0",
+            stderr=b"",
+        )
+        with patch(
+            "apm_cli.utils.git_env._git_config_run",
+            return_value=config_result,
+        ):
+            _validate_package_exists("git.example.com/acme/rules")
 
         # Verify subprocess.run was called
         assert mock_run.called
@@ -995,10 +1010,16 @@ class TestValidatePackageExistsEnv:
         assert env_used.get("GIT_ASKPASS") != "echo", (
             "Generic host validation should not set GIT_ASKPASS=echo"
         )
-        # GIT_CONFIG_NOSYSTEM must NOT be '1' (allows system git config)
-        assert env_used.get("GIT_CONFIG_NOSYSTEM") != "1", (
-            "Generic host validation should not set GIT_CONFIG_NOSYSTEM=1"
-        )
+        assert env_used.get("GIT_CONFIG_NOSYSTEM") == "1"
+        assert env_used.get("GIT_CONFIG_GLOBAL") == os.devnull
+        entries = {
+            (
+                env_used.get(f"GIT_CONFIG_KEY_{index}", ""),
+                env_used.get(f"GIT_CONFIG_VALUE_{index}", ""),
+            )
+            for index in range(int(env_used.get("GIT_CONFIG_COUNT", "0")))
+        }
+        assert ("credential.helper", "fixture-helper") in entries
         # GIT_TERMINAL_PROMPT should still be '0' (no interactive prompts)
         assert env_used.get("GIT_TERMINAL_PROMPT") == "0"
 

@@ -321,21 +321,23 @@ class GitHubPackageDownloader:
             )
 
         auth_ctx = self._resolve_dep_auth_ctx(dep_ref)
-        base_env = (
-            self.auth_resolver.git_env_for_context(
-                auth_ctx,
-                base_env=self.git_env,
-            )
-            if auth_ctx is not None
-            else self.git_env
+        remote_url = self._build_repo_url(
+            dep_ref.repo_url,
+            use_ssh=False,
+            dep_ref=dep_ref,
+            token="",
+            auth_scheme=auth_ctx.auth_scheme if auth_ctx is not None else "basic",
         )
-        git_env = GitAuthEnvBuilder.subprocess_env_dict(base_env)
-        if dep_ref.is_insecure:
-            git_env = self.auth_resolver.build_noninteractive_git_env(
-                base_env=git_env,
-                preserve_config_isolation=True,
-                suppress_credential_helpers=True,
+        if auth_ctx is None:
+            auth_ctx = self.auth_resolver.resolve_for_remote(
+                dep_ref.host or default_host(),
+                remote_url,
+                dep_ref.repo_url.split("/", 1)[0],
+                port=dep_ref.port,
+                host_type=dep_ref.host_type,
             )
+        base_env = self.auth_resolver.git_env_for_remote(auth_ctx, remote_url)
+        git_env = GitAuthEnvBuilder.subprocess_env_dict(base_env)
         return git_env
 
     def _persistent_cache_checkout(
@@ -1318,9 +1320,9 @@ class GitHubPackageDownloader:
                 auth_scheme=dep_auth_scheme,
             )
             if dep_auth_ctx is not None:
-                env = self.auth_resolver.git_env_for_context(
+                env = self.auth_resolver.git_env_for_remote(
                     dep_auth_ctx,
-                    base_env=self.git_env,
+                    auth_url,
                 )
             else:
                 org = dep_ref.repo_url.split("/", 1)[0]

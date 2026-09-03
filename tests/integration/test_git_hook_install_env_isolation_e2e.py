@@ -13,6 +13,7 @@ import pytest
 from tests.integration.test_marketplace_generic_https_credential_lifecycle import (
     _DENY_PROXY,
     _HELPER_PASSWORD,
+    _add_credential_helper,
     _configure_git_https_fixture,
     _git_exec_path,
     _real_git,
@@ -25,7 +26,11 @@ from tests.utils.local_git_http_server import LocalGitHttpServerFactory
 from tests.utils.local_git_repository import LocalGitRepositoryFactory
 from tests.utils.local_package import LocalPackageFactory
 
-pytestmark = [pytest.mark.e2e, pytest.mark.integration]
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.integration,
+    pytest.mark.requires_apm_binary,
+]
 
 _SKILL_PATH = "skills/hook-proof"
 _SKILL_BYTES = b"---\nname: hook-proof\ndescription: Git hook isolation proof\n---\n# Hook proof\n"
@@ -125,6 +130,9 @@ def test_apm_install_from_git_hook_preserves_invoking_worktree(
     )
     child_env["GIT_DIR"] = _git(hook_worktree, environment, "rev-parse", "--absolute-git-dir")
     child_env["GIT_WORK_TREE"] = str(hook_worktree)
+    invoking_config = consumer.root / ".git" / "config"
+    original_config = invoking_config.read_bytes()
+    child_env["GIT_CONFIG"] = str(invoking_config)
 
     result = subprocess.run(
         (
@@ -146,6 +154,7 @@ def test_apm_install_from_git_hook_preserves_invoking_worktree(
     assert result.returncode == 0, f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
     assert _git(hook_worktree, environment, "symbolic-ref", "--short", "HEAD") == "hook-wt"
     assert _git(hook_worktree, environment, "rev-parse", "HEAD") == invoking_sha
+    assert invoking_config.read_bytes() == original_config
     deployed = hook_worktree / ".agents" / "skills" / "hook-proof" / "SKILL.md"
     assert deployed.read_bytes() == _SKILL_BYTES
     assert not marker.exists()
@@ -162,8 +171,13 @@ def test_generic_https_dependency_helper_receives_no_platform_credentials(
     )
     real_git = _real_git()
     helper_log = isolated.root / "credential-helper.json"
-    _write_credential_helper(real_git, isolated.home, helper_log)
+    helper = _write_credential_helper(real_git, isolated.home, helper_log)
     environment = isolated.subprocess_env()
+    _add_credential_helper(
+        real_git,
+        Path(environment["GIT_CONFIG_GLOBAL"]),
+        helper,
+    )
     environment.update(
         {
             "ADO_APM_PAT": "ado-sentinel",

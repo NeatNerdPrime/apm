@@ -353,7 +353,9 @@ class RefResolver:
                 base_env=env,
             )
         if use_ssh:
-            AuthResolver._clear_git_auth_env(env)
+            from ..utils.git_env import clear_git_auth_env
+
+            clear_git_auth_env(env)
             env.pop("GIT_ASKPASS", None)
         env["GIT_TERMINAL_PROMPT"] = "0"
         if not use_ssh:

@@ -442,7 +442,6 @@ def _validate_ado_git_package(
     )
 
     explicit_scheme = (getattr(dep_ref, "explicit_scheme", None) or "").lower() or None
-    is_insecure = bool(getattr(dep_ref, "is_insecure", False))
 
     # Strict-by-default cross-protocol policy (issue microsoft/apm#992):
     # an explicit ``http://`` / ``https://`` / ``ssh://`` URL is honored
@@ -465,15 +464,19 @@ def _validate_ado_git_package(
     # access to user-configured helpers in ~/.gitconfig.  This
     # matches _clone_with_fallback() and git_reference_resolver.
     if is_generic:
-        validate_env = ado_downloader._build_noninteractive_git_env(
-            preserve_config_isolation=is_insecure,
-            suppress_credential_helpers=is_insecure,
+        generic_ctx = auth_resolver.resolve_for_remote(
+            dep_ref.host,
+            package_url,
+            dep_ref.repo_url.split("/", 1)[0],
+            port=dep_ref.port,
+            host_type=dep_ref.host_type,
         )
+        validate_env = auth_resolver.git_env_for_remote(generic_ctx, package_url)
     else:
         validate_env = (
-            auth_resolver.git_env_for_context(
+            auth_resolver.git_env_for_remote(
                 _dep_ctx,
-                base_env=ado_downloader.git_env,
+                package_url,
             )
             if _dep_ctx is not None
             else dict(ado_downloader.git_env)

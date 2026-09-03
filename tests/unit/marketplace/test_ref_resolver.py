@@ -474,8 +474,9 @@ class TestRefResolver:
         args, kwargs = mock_run.call_args
         assert args[0][4] == "git@github.com:acme/tools.git"
         assert "GIT_TOKEN" not in kwargs["env"]
-        assert "GIT_CONFIG_COUNT" not in kwargs["env"]
-        assert "GIT_CONFIG_VALUE_0" not in kwargs["env"]
+        count = int(kwargs["env"].get("GIT_CONFIG_COUNT", "0"))
+        keys = {kwargs["env"].get(f"GIT_CONFIG_KEY_{index}", "").lower() for index in range(count)}
+        assert all("extraheader" not in key for key in keys)
         resolver.close()
 
     @patch("apm_cli.marketplace.ref_resolver.subprocess.run")

@@ -30,6 +30,10 @@ def _make_resolver():
     ctx = MagicMock(source="env", token_type="pat", token=None)
     resolver.resolve.return_value = ctx
     resolver.resolve_for_dep.return_value = ctx
+    resolver.resolve_for_remote.return_value = ctx
+    resolver.git_env_for_remote.return_value = {
+        "GIT_TERMINAL_PROMPT": "0",
+    }
     resolver.build_noninteractive_git_env.return_value = {
         "GIT_TERMINAL_PROMPT": "0",
     }
@@ -163,7 +167,7 @@ class TestPerAttemptVerboseLogging:
         logger.verbose_detail.side_effect = lambda msg: verbose_msgs.append(msg)
 
         with patch(
-            "subprocess.run",
+            "apm_cli.utils.git_env.git_remote_refs",
             side_effect=[
                 _failed_run("fatal: Authentication failed for HTTPS"),
                 _failed_run("ssh: connect to host port 22: Connection timed out"),

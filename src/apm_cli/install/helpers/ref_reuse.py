@@ -161,6 +161,7 @@ def maybe_resolve_git_semver(
     resolver_git_env = git_env
     if selected_attempt.requested_url is not None:
         from apm_cli.core.auth import AuthResolver
+        from apm_cli.utils.git_env import clear_git_platform_token_env
 
         resolver_git_env = AuthResolver.build_noninteractive_git_env(
             base_env=git_env or {},
@@ -170,7 +171,7 @@ def maybe_resolve_git_semver(
                 host_type=dep_ref.host_type,
             ).kind,
         )
-        AuthResolver._clear_platform_token_env(resolver_git_env, remove=True)
+        clear_git_platform_token_env(resolver_git_env, remove=True)
     ref_resolver = get_shared_ref_resolver(
         dep_ref.host,
         resolver_token,

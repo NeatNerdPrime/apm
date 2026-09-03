@@ -31,7 +31,6 @@ Security gates (round-2 panel findings)
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import re
 import subprocess
@@ -49,7 +48,6 @@ from ..utils.git_env import git_subprocess_error_text
 from ..utils.github_host import (
     default_host,
     is_github_hostname,
-    set_authorization_header_git_env,
 )
 from ..utils.path_security import (
     PathTraversalError,
@@ -333,30 +331,10 @@ def _build_validation_attempts(
 ) -> list[AttemptSpec]:
     """Return the AttemptSpec chain for a probe against ``dep_ref``.
 
-    Mirrors the auth chain in ``_clone_with_fallback`` and centralises the
-    header-injection switch so both ``ls-remote`` and the shallow-fetch
-    path probe reuse it.
+    AuthResolver owns remote-aware credential suppression and host-specific
+    header formatting. This helper builds tokenless URLs and labels the
+    resulting validation attempts; it never replaces AuthResolver output.
 
-    SECURITY (panel round-3 finding): for ALL HTTPS attempts (ADO and
-    non-ADO) we inject credentials via ``http.extraheader`` rather than
-    embedding them in the URL.  This keeps tokens out of the OS process
-    table, git's own logs, and any temp ``.git/config`` written by the
-    shallow-fetch probe.
-
-    Auth scheme handling (panel round-3 ADO Basic finding):
-      * ADO + ``auth_scheme == "basic"`` (PAT): ``Authorization: Basic
-        base64(":" + PAT)`` per ADO's HTTP Basic convention.  A raw
-        ``Bearer <PAT>`` is rejected with 401.
-      * ADO + ``auth_scheme == "bearer"`` (AAD JWT): ``Authorization:
-        Bearer <token>``.
-      * GitLab: ``Authorization: Basic base64("oauth2:" + PAT)`` to match
-        the GitLab HTTPS clone credential shape without putting the PAT in
-        the URL.
-      * Non-ADO with ``auth_scheme == "bearer"``: ``Authorization: Bearer
-        <token>`` (matches GitHub recommendation for OAuth/App tokens).
-      * Non-ADO with ``auth_scheme == "basic"`` (legacy classic PAT):
-        ``Authorization: Bearer <token>`` -- GitHub accepts both forms;
-        Bearer keeps the token out of any URL component.
     """
     if dep_ref.is_artifactory():
         return []
@@ -399,65 +377,63 @@ def _build_validation_attempts(
         if is_ado and dep_auth_scheme == "basic":
             # ADO PAT requires HTTP Basic with base64(":PAT"). A raw
             # Bearer header would 401 every ADO PAT user.
-            encoded = base64.b64encode(f":{dep_token}".encode()).decode("ascii")
-            auth_header = ("Basic", encoded)
             label = "ADO authenticated HTTPS (basic header)"
         elif is_ado:  # bearer (AAD JWT)
-            auth_header = ("Bearer", dep_token)
             label = "ADO authenticated HTTPS (bearer header)"
         elif is_gitlab:
-            encoded = base64.b64encode(f"oauth2:{dep_token}".encode()).decode("ascii")
-            auth_header = ("Basic", encoded)
             label = "GitLab authenticated HTTPS (basic header)"
         else:
             # Non-ADO: header injection rather than URL embedding so the
             # token never appears in argv or temp .git/config.
-            auth_header = ("Bearer", dep_token)
             label = "authenticated HTTPS (header)"
 
-        token_env = (
-            downloader.auth_resolver.git_env_for_context(
-                dep_auth_ctx,
-                base_env=downloader.git_env,
-            )
-            if dep_auth_ctx is not None
-            else dict(downloader.git_env)
-        )
-        set_authorization_header_git_env(token_env, *auth_header)
         token_url = downloader._build_repo_url(
             dep_ref.repo_url,
             use_ssh=False,
             dep_ref=dep_ref,
-            token="",  # tokenless URL: credentials live in the env header
+            token="",
             auth_scheme=dep_auth_scheme if is_ado else "basic",
+        )
+        token_env = (
+            downloader.auth_resolver.git_env_for_remote(
+                dep_auth_ctx,
+                token_url,
+            )
+            if dep_auth_ctx is not None
+            else downloader.auth_resolver._build_git_env(
+                dep_token,
+                scheme=dep_auth_scheme,
+                host_kind=host_info.kind if host_info is not None else "github",
+                base_env=downloader.git_env,
+            )
         )
         attempts.append(AttemptSpec(label, token_url, token_env))
 
     # Attempt 2: plain HTTPS w/ credential helper (no token, no header).
-    plain_env = (
-        downloader.auth_resolver.build_public_github_anonymous_git_env(
-            base_env=downloader.git_env,
-        )
-        if public_github_anonymous_first
-        else (
-            downloader.auth_resolver.build_noninteractive_git_env(
-                base_env=downloader.git_env,
-                host_kind="ado",
-                preserve_config_isolation=True,
-            )
-            if is_ado
-            else downloader._build_noninteractive_git_env(
-                preserve_config_isolation=is_insecure,
-                suppress_credential_helpers=is_insecure,
-            )
-        )
-    )
     plain_url = downloader._build_repo_url(
         dep_ref.repo_url,
         use_ssh=False,
         dep_ref=dep_ref,
         token="",
     )
+    if public_github_anonymous_first:
+        plain_env = downloader.auth_resolver.build_public_github_anonymous_git_env(
+            base_env=downloader.git_env,
+        )
+    elif host_info is not None:
+        plain_ctx = downloader.auth_resolver.resolve_for_remote(
+            host_info.host,
+            plain_url,
+            dep_ref.repo_url.split("/", 1)[0],
+            port=dep_ref.port,
+            host_type=dep_ref.host_type,
+        )
+        plain_env = downloader.auth_resolver.git_env_for_remote(plain_ctx, plain_url)
+    else:
+        plain_env = downloader._build_noninteractive_git_env(
+            preserve_config_isolation=is_insecure,
+            suppress_credential_helpers=is_insecure,
+        )
     plain_label = (
         "anonymous GitHub HTTPS"
         if public_github_anonymous_first
@@ -510,6 +486,8 @@ def _ref_exists_via_ls_remote(
         if ls-remote succeeded via SSH but the follow-up probe used the
         rejected PAT, the fallback would silently false-reject).
     """
+    if dep_ref.is_artifactory():
+        return False, None
     is_sha = _is_sha_pin(ref)
     ref_lc = ref.lower()
     g = git.cmd.Git()
@@ -553,8 +531,6 @@ def _ref_exists_via_ls_remote(
             probe_env = dict(git_env)
             label = "anonymous GitHub HTTPS"
             if token:
-                set_authorization_header_git_env(probe_env, "Bearer", token)
-                probe_env.pop("GIT_TOKEN", None)
                 label = "authenticated GitHub HTTPS"
             url = downloader._build_repo_url(
                 dep_ref.repo_url,

@@ -58,6 +58,10 @@ def _make_resolver(auth_ctx=None):
         auth_ctx = _make_auth_ctx()
     resolver.resolve_for_dep.return_value = auth_ctx
     resolver.git_env_for_context.side_effect = AuthResolver.git_env_for_context
+    resolver.git_env_for_remote.side_effect = lambda ctx, _url: AuthResolver.git_env_for_context(
+        ctx,
+        base_env=ctx.git_env,
+    )
     resolver.build_error_context.return_value = "    Diagnostic payload"
     return resolver
 
@@ -130,9 +134,11 @@ class TestBearerGitEnvMergedIntoSubprocess:
         call_kwargs = mock_run.call_args
         # subprocess.run is called with env= keyword or positional
         env = call_kwargs.kwargs.get("env") or call_kwargs[1].get("env", {})
-        assert env.get("GIT_CONFIG_COUNT") == "1"
-        assert env.get("GIT_CONFIG_KEY_0") == "http.extraheader"
-        scheme, credential = env["GIT_CONFIG_VALUE_0"].split(" ", 2)[1:]
+        entries = {
+            env.get(f"GIT_CONFIG_KEY_{index}", ""): env.get(f"GIT_CONFIG_VALUE_{index}", "")
+            for index in range(int(env.get("GIT_CONFIG_COUNT", "0")))
+        }
+        scheme, credential = entries["http.extraheader"].split(" ", 2)[1:]
         assert scheme == "Bearer"
         assert credential == "test-bearer"
 

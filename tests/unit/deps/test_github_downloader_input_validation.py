@@ -28,6 +28,7 @@ Covers branches not hit by the existing test_github_downloader_validation.py:
 
 from __future__ import annotations
 
+import base64
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -383,10 +384,11 @@ class TestBuildValidationAttempts:
         labels = [a.label for a in attempts]
         assert not any("header" in lab for lab in labels)
 
-    def test_ado_basic_uses_http_basic_header(self) -> None:
+    def test_ado_basic_delegates_header_format_to_auth_resolver(self) -> None:
         dl = _make_downloader()
         dl.auth_resolver.resolve_for_dep.return_value.token = "myPAT"
         dl.auth_resolver.resolve_for_dep.return_value.auth_scheme = "basic"
+        dl.auth_resolver.git_env_for_remote.return_value = {"CANONICAL": "ado"}
         dep = self._make_dep()
         dep.is_azure_devops.return_value = True
         dep.host = "dev.azure.com"
@@ -405,17 +407,18 @@ class TestBuildValidationAttempts:
         assert len(auth_attempts) >= 1
         # Verify it's Base64 Basic, not a raw Bearer
         token_attempt = auth_attempts[0]
-        env_values = list(token_attempt.env.values())
-        # The GIT_CONFIG_VALUE should contain "Basic " not "Bearer "
-        header_values = [
-            v for v in env_values if isinstance(v, str) and ("Basic" in v or "Bearer" in v)
-        ]
-        assert any("Basic" in v for v in header_values)
+        assert token_attempt.env == {"CANONICAL": "ado"}
+        dl.auth_resolver.git_env_for_remote.assert_any_call(
+            dl.auth_resolver.resolve_for_dep.return_value,
+            "https://dev.azure.com/myorg/myproject/_git/myrepo",
+        )
 
-    def test_non_ado_with_token_uses_bearer_header(self) -> None:
+    def test_github_token_delegates_header_format_to_auth_resolver(self) -> None:
         dl = _make_downloader(token="ghp_token")
         dl.auth_resolver.resolve_for_dep.return_value.token = "ghp_token"
         dl.auth_resolver.resolve_for_dep.return_value.auth_scheme = "basic"
+        dl.auth_resolver.resolve_for_dep.return_value.host_info.kind = "github"
+        dl.auth_resolver.git_env_for_remote.return_value = {"CANONICAL": "github"}
         dep = self._make_dep()
         dep.is_azure_devops.return_value = False
         dl.auth_resolver.classify_host.return_value = MagicMock(kind="github")
@@ -423,15 +426,18 @@ class TestBuildValidationAttempts:
         attempts = _build_validation_attempts(dl, dep, lambda m: None)
         auth_attempts = [a for a in attempts if "header" in a.label.lower()]
         assert len(auth_attempts) >= 1
-        env_values = list(auth_attempts[0].env.values())
-        header_values = [v for v in env_values if isinstance(v, str) and ("Bearer" in v)]
-        assert any("Bearer" in v for v in header_values)
+        assert auth_attempts[0].env == {"CANONICAL": "github"}
+        dl.auth_resolver.git_env_for_remote.assert_any_call(
+            dl.auth_resolver.resolve_for_dep.return_value,
+            "https://github.com/owner/repo.git",
+        )
 
     def test_token_attempt_preserves_retained_git_config(self) -> None:
         """#2368: the auth header must not clobber indexed entries in git_env."""
         dl = _make_downloader(token="ghp_token")
         dl.auth_resolver.resolve_for_dep.return_value.token = "ghp_token"
         dl.auth_resolver.resolve_for_dep.return_value.auth_scheme = "basic"
+        dl.auth_resolver.resolve_for_dep.return_value.host_info.kind = "github"
         dl.git_env = {
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "safe.bareRepository",
@@ -440,6 +446,9 @@ class TestBuildValidationAttempts:
         dep = self._make_dep()
         dep.is_azure_devops.return_value = False
         dl.auth_resolver.classify_host.return_value = MagicMock(kind="github")
+        dl.auth_resolver.git_env_for_remote.side_effect = lambda ctx, _url: (
+            AuthResolver.git_env_for_context(ctx, base_env=dl.git_env)
+        )
 
         attempts = _build_validation_attempts(dl, dep, lambda m: None)
         token_env = attempts[0].env
@@ -447,7 +456,10 @@ class TestBuildValidationAttempts:
         assert token_env["GIT_CONFIG_KEY_0"] == "safe.bareRepository"
         assert token_env["GIT_CONFIG_VALUE_0"] == "explicit"
         assert token_env["GIT_CONFIG_KEY_1"] == "http.extraheader"
-        assert token_env["GIT_CONFIG_VALUE_1"] == "Authorization: Bearer ghp_token"
+        header = token_env["GIT_CONFIG_VALUE_1"]
+        assert header.startswith("Authorization: Basic ")
+        encoded = header.removeprefix("Authorization: Basic ")
+        assert base64.b64decode(encoded).decode() == "x-access-token:ghp_token"
         # The downloader's shared base env must not be mutated.
         assert dl.git_env["GIT_CONFIG_COUNT"] == "1"
 

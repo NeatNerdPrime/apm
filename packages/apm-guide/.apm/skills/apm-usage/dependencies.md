@@ -103,11 +103,12 @@ across protocols.
 |-----------------|----------------|
 | `ssh://...` or `git@host:...` | SSH only |
 | `https://...` or `http://...` | HTTP(S) only |
-| Shorthand with `git config url.<base>.insteadOf` rewriting to SSH | SSH only |
 | Shorthand otherwise | HTTPS only |
 
 A failed clone fails loudly, naming the URL and the protocol attempted.
-Explicit URL schemes are honored exactly.
+An explicit scheme prevents APM from selecting another protocol. Git still
+applies a matching safe `url.<base>.insteadOf` rule to the selected URL, which
+may choose SSH or a local mirror.
 This includes in-repository plugins from GitLab and generic git marketplaces:
 an SSH registration is persisted as SSH `git:` and `path:`; an HTTPS
 registration remains HTTPS.
@@ -132,11 +133,8 @@ git config --global url."git@github.com:".insteadOf "https://github.com/"
 apm install owner/repo                 # APM clones over SSH
 ```
 
-Safe rewrites remain active. APM rejects replacements that contain HTTP(S)
-credentials, downgrade HTTPS to an insecure transport, or redirect an
-authenticated HTTPS request to another origin. Run
-`git config --show-origin --get-regexp '^url\..*\.insteadOf$'` to locate a
-rejected rule.
+Safe rewrites remain active. For rejection rules and recovery, see
+[authentication](authentication.md).
 
 Restore the legacy permissive chain (escape hatch -- not a long-term
 setting):

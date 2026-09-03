@@ -699,6 +699,43 @@ class TestGitlabGitTransportIntegration:
             if key.startswith("GIT_CONFIG_VALUE_")
         )
 
+    def test_gitlab_explicit_http_suppresses_managed_credentials(self) -> None:
+        """A GitLab PAT never follows a path fetch onto plaintext HTTP."""
+        from apm_cli.deps.github_downloader import GitHubPackageDownloader
+
+        dep_ref = DependencyReference(
+            repo_url="group/repo",
+            host="gitlab.com",
+            explicit_scheme="http",
+            is_insecure=True,
+        )
+        with (
+            patch.dict(os.environ, {"GITLAB_APM_PAT": "gitlab-secret"}, clear=True),
+            _CRED_FILL_PATCH,
+        ):
+            downloader = GitHubPackageDownloader()
+            with patch(
+                "apm_cli.deps.download_strategies.GitSparseFileTransport",
+                return_value=_mock_git_transport(return_value=b"content"),
+            ) as transport:
+                downloader._download_github_file(
+                    dep_ref,
+                    "agents/spec.agent.md",
+                    "main",
+                )
+
+        kwargs = transport.call_args.kwargs
+        remote_url = kwargs["build_repo_url_fn"](dep_ref.repo_url, dep_ref=dep_ref)
+        assert urlparse(remote_url).scheme == "http"
+        git_env = kwargs["git_env"]
+        assert "GIT_TOKEN" not in git_env
+        assert "GITLAB_APM_PAT" not in git_env
+        count = int(git_env.get("GIT_CONFIG_COUNT", "0"))
+        assert all(
+            "extraheader" not in git_env.get(f"GIT_CONFIG_KEY_{index}", "").lower()
+            for index in range(count)
+        )
+
     def test_gitlab_pat_fallback_when_git_fails(self) -> None:
         """Thin GITLAB_PAT fallback: REST API called when git transport raises."""
         from urllib.parse import urlparse

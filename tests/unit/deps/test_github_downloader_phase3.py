@@ -963,10 +963,9 @@ class TestTrySparseCheckout:
         ctx.auth_scheme = "basic"
         ctx.git_env = {}
         downloader.auth_resolver.resolve_for_dep.return_value = ctx
-        downloader.auth_resolver.git_env_for_context.side_effect = lambda auth_ctx, *, base_env: {
-            **base_env,
-            **auth_ctx.git_env,
-        }
+        downloader.auth_resolver.git_env_for_remote.side_effect = lambda auth_ctx, _remote_url: (
+            dict(auth_ctx.git_env)
+        )
 
         ok_result = MagicMock()
         ok_result.returncode = 0
@@ -986,10 +985,9 @@ class TestTrySparseCheckout:
         ctx.auth_scheme = "basic"
         ctx.git_env = {}
         downloader.auth_resolver.resolve_for_dep.return_value = ctx
-        downloader.auth_resolver.git_env_for_context.side_effect = lambda auth_ctx, *, base_env: {
-            **base_env,
-            **auth_ctx.git_env,
-        }
+        downloader.auth_resolver.git_env_for_remote.side_effect = lambda auth_ctx, _remote_url: (
+            dict(auth_ctx.git_env)
+        )
         clone_path = tmp_path / "sparse"
         dangling = clone_path / "skills" / "foo" / "reference.md"
         ok_result = MagicMock(returncode=0)
@@ -1017,10 +1015,9 @@ class TestTrySparseCheckout:
         ctx.auth_scheme = "bearer"
         ctx.git_env = {"GIT_EXTRA_HEADER": "Authorization: Bearer tok"}
         downloader.auth_resolver.resolve_for_dep.return_value = ctx
-        downloader.auth_resolver.git_env_for_context.side_effect = lambda auth_ctx, *, base_env: {
-            **base_env,
-            **auth_ctx.git_env,
-        }
+        downloader.auth_resolver.git_env_for_remote.side_effect = lambda auth_ctx, _remote_url: (
+            dict(auth_ctx.git_env)
+        )
 
         ok_result = MagicMock()
         ok_result.returncode = 0

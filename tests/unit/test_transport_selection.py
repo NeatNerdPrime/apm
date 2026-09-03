@@ -116,6 +116,23 @@ class TestExplicitSchemeStrict:
         assert _scheme_labels(plan) == ["https"]
         assert plan.attempts[0].use_token is False
 
+    def test_explicit_https_reports_effective_file_rewrite(self):
+        candidate = "https://github.com/owner/repo.git"
+        selector = TransportSelector(
+            insteadof_resolver=FakeInsteadOfResolver({"https://github.com/": "file:///mirror/"})
+        )
+
+        plan = selector.select(
+            dep_ref=_dep(candidate),
+            has_token=True,
+            candidate_url=candidate,
+        )
+
+        assert _scheme_labels(plan) == ["file"]
+        assert plan.attempts[0].use_token is False
+        assert plan.attempts[0].requested_url == candidate
+        assert plan.attempts[0].effective_url == "file:///mirror/owner/repo.git"
+
     def test_explicit_http_is_strict_and_never_uses_token(self):
         sel = TransportSelector(insteadof_resolver=FakeInsteadOfResolver())
         plan = sel.select(
@@ -172,6 +189,21 @@ class TestShorthandWithInsteadOf:
         assert resolver.calls == [candidate]
         assert plan.attempts[0].requested_url == candidate
         assert plan.attempts[0].effective_url == "ssh://git@git.example.test:8443/acme/repo.git"
+
+    def test_https_preference_reports_effective_ssh_rewrite(self):
+        candidate = "https://github.com/owner/repo"
+        plan = TransportSelector(
+            insteadof_resolver=FakeInsteadOfResolver({"https://github.com/": "git@github.com:"})
+        ).select(
+            dep_ref=_dep("owner/repo"),
+            cli_pref=ProtocolPreference.HTTPS,
+            has_token=True,
+            candidate_url=candidate,
+        )
+
+        assert _scheme_labels(plan) == ["ssh"]
+        assert plan.attempts[0].use_token is False
+        assert plan.attempts[0].requested_url == candidate
 
     def test_no_insteadof_defaults_to_https_strict(self):
         sel = TransportSelector(insteadof_resolver=FakeInsteadOfResolver())
@@ -366,7 +398,9 @@ class TestGitConfigInsteadOfResolver:
         with patch("apm_cli.utils.git_env._git_config_run") as run:
             # Simulate one rewrite rule: https://github.com/ -> git@github.com:
             run.return_value.returncode = 0
-            run.return_value.stdout = b"url.git@github.com:.insteadof\nhttps://github.com/\0"
+            run.return_value.stdout = (
+                b"command\0url.git@github.com:.insteadof\nhttps://github.com/\0"
+            )
             resolver.resolve("https://github.com/owner/repo")
             resolver.resolve("https://github.com/other/proj")
             resolver.resolve("https://gitlab.com/acme/lib")
@@ -390,7 +424,7 @@ class TestGitConfigInsteadOfResolver:
             ),
             patch("apm_cli.utils.git_env._git_config_run") as run,
         ):
-            run.return_value.returncode = 1
+            run.return_value.returncode = 0
             run.return_value.stdout = b""
             resolver.resolve("https://github.com/owner/repo")
             _args, kwargs = run.call_args
@@ -400,6 +434,6 @@ class TestGitConfigInsteadOfResolver:
     def test_resolve_returns_none_when_no_rewrites(self):
         resolver = GitConfigInsteadOfResolver()
         with patch("apm_cli.utils.git_env._git_config_run") as run:
-            run.return_value.returncode = 1
+            run.return_value.returncode = 0
             run.return_value.stdout = b""
             assert resolver.resolve("https://github.com/owner/repo") is None

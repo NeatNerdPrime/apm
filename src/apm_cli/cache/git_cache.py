@@ -44,6 +44,10 @@ _log = logging.getLogger(__name__)
 
 # Full SHA pattern: 40 hex characters
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+_FALLBACK_REFSPECS = (
+    "+refs/heads/*:refs/remotes/apm-fallback/*",
+    "+refs/tags/*:refs/tags/*",
+)
 
 
 def _safe_git_args() -> list[str]:
@@ -233,16 +237,21 @@ class GitCache:
         """Repair and validate a sparse checkout before any cache return."""
         if not sparse_paths:
             return checkout_dir
-        from ..utils.git_env import get_git_executable, git_network_env
+        from ..utils.git_env import get_git_executable, git_network_env, git_subprocess_env
 
         git_exe = get_git_executable()
-        subprocess_env = git_network_env(url, env, worktree=checkout_dir)
+        subprocess_env = git_subprocess_env(env)
         dangling = repair_dangling_cone_symlinks(
             git_exe,
             checkout_dir,
             list(sparse_paths),
             env=subprocess_env,
             extra_git_args=_safe_git_args(),
+            repair_env_factory=lambda: git_network_env(
+                url,
+                env,
+                worktree=checkout_dir,
+            ),
         )
         if dangling is not None:
             _log.info(
@@ -795,9 +804,20 @@ class GitCache:
                 check=True,
             )
         except subprocess.CalledProcessError:
-            # Some servers don't allow fetching by SHA -- fetch all refs
+            # Some servers do not allow fetching by SHA. Broaden the explicit
+            # validated remote without consulting any configured sibling remote.
+            fallback_fetch_args = [
+                git_exe,
+                *_safe_git_args(),
+                "--git-dir",
+                str(bare_dir),
+                "fetch",
+            ]
+            if is_partial:
+                fallback_fetch_args += ["--filter=blob:none"]
+            fallback_fetch_args += [url, *_FALLBACK_REFSPECS]
             subprocess.run(
-                [git_exe, *_safe_git_args(), "--git-dir", str(bare_dir), "fetch", "--all"],
+                fallback_fetch_args,
                 capture_output=True,
                 text=True,
                 timeout=120,

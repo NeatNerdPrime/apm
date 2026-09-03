@@ -213,9 +213,10 @@ def bare_clone_with_fallback(
                         check=True,
                         capture_output=True,
                     )
+                    remote_env = git_network_env(url, env, git_dir=target)
                     subprocess.run(
                         [git_exe, "--git-dir", str(target), "fetch", "--depth=1", "origin", ref],
-                        env=env,
+                        env=remote_env,
                         check=True,
                         capture_output=True,
                         timeout=300,

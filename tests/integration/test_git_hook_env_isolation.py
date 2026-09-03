@@ -432,3 +432,78 @@ def test_git_cache_fetch_rejects_dependency_bare_local_rewrite(tmp_path: Path) -
             "a" * 40,
             env={"PATH": os.environ["PATH"]},
         )
+
+
+def test_git_cache_fetch_fallback_contacts_only_explicit_remote(tmp_path: Path) -> None:
+    """A broadened SHA fetch cannot fan out to configured sibling remotes."""
+    import apm_cli.cache.git_cache as git_cache_module
+
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init")
+    _git(source, "config", "user.email", "test@example.com")
+    _git(source, "config", "user.name", "Test")
+    sha = _commit(source, "dependency\n", "dependency")
+    source_bare = tmp_path / "source.git"
+    subprocess.run(
+        [get_git_executable(), "clone", "--bare", str(source), str(source_bare)],
+        check=True,
+        capture_output=True,
+        env=git_subprocess_env(),
+    )
+
+    cache_bare = tmp_path / "cache.git"
+    subprocess.run(
+        [get_git_executable(), "init", "--bare", str(cache_bare)],
+        check=True,
+        capture_output=True,
+        env=git_subprocess_env(),
+    )
+    subprocess.run(
+        [
+            get_git_executable(),
+            "--git-dir",
+            str(cache_bare),
+            "remote",
+            "add",
+            "unrelated",
+            "http://127.0.0.1:9/unrelated.git",
+        ],
+        check=True,
+        capture_output=True,
+        env=git_subprocess_env(),
+    )
+
+    real_run = subprocess.run
+    fetch_calls: list[list[str]] = []
+
+    def fail_sha_fetch_once(args, **kwargs):
+        if "fetch" in args:
+            fetch_calls.append(list(args))
+            if len(fetch_calls) == 1:
+                raise subprocess.CalledProcessError(1, args)
+        return real_run(args, **kwargs)
+
+    with patch.object(git_cache_module.subprocess, "run", side_effect=fail_sha_fetch_once):
+        GitCache(tmp_path / "cache")._fetch_into_bare_locked(
+            cache_bare,
+            source_bare.as_uri(),
+            sha,
+            env={
+                "PATH": os.environ["PATH"],
+                "GIT_ALLOW_PROTOCOL": "file",
+            },
+        )
+
+    assert len(fetch_calls) == 2
+    assert "--all" not in fetch_calls[1]
+    assert source_bare.as_uri() in fetch_calls[1]
+    assert (
+        real_run(
+            [get_git_executable(), "--git-dir", str(cache_bare), "cat-file", "-e", sha],
+            check=False,
+            capture_output=True,
+            env=git_subprocess_env(),
+        ).returncode
+        == 0
+    )

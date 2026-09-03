@@ -55,6 +55,17 @@ import sys
 
 argv = sys.argv[1:]
 
+if "config" in argv and "--list" in argv:
+    fields = bytearray()
+    count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    for index in range(count):
+        key = os.environ.get(f"GIT_CONFIG_KEY_{index}", "")
+        value = os.environ.get(f"GIT_CONFIG_VALUE_{index}", "")
+        if key:
+            fields.extend(f"command\\0{key}\\n{value}\\0".encode())
+    os.write(1, fields)
+    sys.exit(0)
+
 # Probe call from preflight: ls-remote --heads --exit-code <url>
 if argv[:1] == ["ls-remote"]:
     # Look for a bearer header injected via GIT_CONFIG_VALUE_<n>.

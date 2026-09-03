@@ -39,6 +39,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
+from urllib.parse import urlsplit
 
 from apm_cli.core.host_providers import (
     HOST_PROVIDERS,
@@ -124,31 +125,6 @@ _PORT_CREDENTIAL_DOCS_URL = (
     "https://microsoft.github.io/apm/getting-started/authentication/"
     "#custom-port-hosts-and-per-port-credentials"
 )
-_GIT_CHILD_TOKEN_ENV_NAMES = frozenset(
-    {
-        "ADO_APM_PAT",
-        "ARTIFACTORY_APM_TOKEN",
-        "COPILOT_GITHUB_TOKEN",
-        "GH_ENTERPRISE_TOKEN",
-        "GH_TOKEN",
-        "GITHUB_APM_PAT",
-        "GITHUB_COPILOT_PAT",
-        "GITHUB_ENTERPRISE_TOKEN",
-        "GITHUB_MODELS_KEY",
-        "GITHUB_PERSONAL_ACCESS_TOKEN",
-        "GITHUB_TOKEN",
-        "GITLAB_APM_PAT",
-        "GITLAB_TOKEN",
-        "PROXY_REGISTRY_TOKEN",
-    }
-)
-_GIT_CHILD_TOKEN_ENV_PREFIXES = (
-    "APM_REGISTRY_PASS_",
-    "APM_REGISTRY_TOKEN_",
-    "APM_REGISTRY_USER_",
-    "GITHUB_APM_PAT_",
-)
-
 # Git localises its diagnostics through gettext, but APM classifies clone
 # failures by matching English signal strings (see
 # ``AuthResolver.is_public_github_auth_failure``). A translated stderr makes an
@@ -1436,6 +1412,13 @@ class AuthResolver:
                 preserve_config_isolation=policy.preserve_config_isolation,
                 suppress_credential_helpers=policy.suppress_credential_helpers,
             )
+        if ctx.host_info.kind == "generic" and urlsplit(remote_url).scheme.lower() != "http":
+            from apm_cli.utils.git_env import git_subprocess_env
+
+            caller_env = git_subprocess_env()
+            for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"):
+                if name in caller_env:
+                    env[name] = caller_env[name]
         self._clear_platform_token_env(env, remove=True)
         if policy.reject_https_downgrade:
             from ..utils.git_env import validate_git_url_rewrite_safety
@@ -1461,40 +1444,16 @@ class AuthResolver:
         The default empty values mask those sources in GitPython and direct
         subprocesses. Complete subprocess environments may remove them.
         """
-        for key in tuple(env):
-            if key in _GIT_CHILD_TOKEN_ENV_NAMES or key.startswith(_GIT_CHILD_TOKEN_ENV_PREFIXES):
-                if remove:
-                    env.pop(key, None)
-                else:
-                    env[key] = ""
+        from apm_cli.utils.git_env import clear_git_platform_token_env
+
+        clear_git_platform_token_env(env, remove=remove)
 
     @staticmethod
     def _clear_git_auth_env(env: dict) -> None:
         """Remove inherited Git authorization channels before an attempt."""
-        env.pop("GIT_TOKEN", None)
-        env.pop("GIT_HTTP_EXTRAHEADER", None)
-        env.pop("GIT_CONFIG_PARAMETERS", None)
-        try:
-            count = int(env.pop("GIT_CONFIG_COUNT", "0"))
-        except ValueError:
-            count = 0
-        retained: list[tuple[str, str]] = []
-        for index in range(max(0, count)):
-            key = env.pop(f"GIT_CONFIG_KEY_{index}", "")
-            value = env.pop(f"GIT_CONFIG_VALUE_{index}", "")
-            normalized = key.lower()
-            if "extraheader" in normalized or value.strip().lower().startswith("authorization:"):
-                continue
-            if key:
-                retained.append((key, value))
-        for key in tuple(env):
-            if key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
-                env.pop(key, None)
-        if retained:
-            env["GIT_CONFIG_COUNT"] = str(len(retained))
-            for index, (key, value) in enumerate(retained):
-                env[f"GIT_CONFIG_KEY_{index}"] = key
-                env[f"GIT_CONFIG_VALUE_{index}"] = value
+        from apm_cli.utils.git_env import clear_git_auth_env
+
+        clear_git_auth_env(env)
 
     def emit_stale_pat_diagnostic(self, host_display: str) -> None:
         """Emit a [!] warning when PAT was rejected but bearer succeeded.

@@ -593,6 +593,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Ref reuse drops the semver preflight eligibility gate.",
     ),
     MutationCase(
+        guard_id="transport-platform-git-single-remote-fetch",
+        rule_id="transport-platform-git-child-environment",
+        path="src/apm_cli/cache/git_cache.py",
+        old="            fallback_fetch_args += [url, *_FALLBACK_REFSPECS]",
+        new='            fallback_fetch_args += ["--all"]',
+        intent="A failed SHA fetch fans out to every configured remote.",
+    ),
+    MutationCase(
         guard_id="transport-platform-git-url-credentials-out-of-argv",
         rule_id="transport-platform-git-child-environment",
         path="src/apm_cli/deps/clone_engine.py",
@@ -604,8 +612,11 @@ MUTATIONS: tuple[MutationCase, ...] = (
         guard_id="transport-platform-git-url-rewrite-enforcement",
         rule_id="transport-platform-git-child-environment",
         path="src/apm_cli/utils/git_env.py",
-        old="    effective_url, rewrites = _validated_git_url_rewrite_policy(",
-        new="    effective_url, rewrites = (lambda *_args, **_kwargs: (None, ()))(",
+        old="    effective_url, snapshot = _validated_git_url_rewrite_policy(",
+        new=(
+            "    effective_url, snapshot = "
+            "(lambda *_args, **_kwargs: (None, _GitConfigSnapshot((), (), ())))("
+        ),
         intent="The canonical network environment bypasses URL rewrite validation.",
     ),
     MutationCase(
@@ -620,8 +631,8 @@ MUTATIONS: tuple[MutationCase, ...] = (
         guard_id="transport-platform-git-url-rewrite-routing",
         rule_id="transport-platform-git-child-environment",
         path="src/apm_cli/deps/bare_cache.py",
-        old="                    env = git_network_env(url, env, git_dir=target)",
-        new="                    env = sanitize_for_git(env)",
+        old="                    remote_env = git_network_env(url, env, git_dir=target)",
+        new="                    remote_env = sanitize_for_git(env)",
         intent="Shared bare clones bypass the canonical network Git environment owner.",
     ),
     MutationCase(

@@ -50,6 +50,7 @@ from scripts.architecture_linter.models import Rule, Violation
 _RID_HOST_CRED = "transport-platform-host-credential-resolution"
 _RID_GIT_CHILD_ENV = "transport-platform-git-child-environment"
 _RID_GIT_CLONE_HOOKS = "transport-platform-git-clone-hooks-disabled"
+_RID_GIT_SINGLE_REMOTE = "transport-platform-git-single-remote-fetch"
 _RID_GIT_URL_CREDENTIALS = "transport-platform-git-url-credentials-out-of-argv"
 _RID_GIT_URL_ENFORCEMENT = "transport-platform-git-url-rewrite-enforcement"
 _RID_GIT_URL_ONCE = "transport-platform-git-url-rewrite-once"
@@ -127,19 +128,29 @@ def _check_host_credential_resolution(provider: FactsProvider) -> tuple[Violatio
             inv,
             _RID_HOST_CRED,
             _AUTH_OWNER,
-            ("_clear_platform_token_env(env)", '"COPILOT_GITHUB_TOKEN"'),
-            "AuthResolver must clear platform token env and own COPILOT_GITHUB_TOKEN",
+            ("_clear_platform_token_env(env)", "clear_git_platform_token_env"),
+            "AuthResolver must route platform-token clearing through the Git child owner",
+        )
+    )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_HOST_CRED,
+            "src/apm_cli/utils/git_env.py",
+            ('"COPILOT_GITHUB_TOKEN"',),
+            "The Git child environment owner must retain the platform-token vocabulary",
         )
     )
     _ado_consumers: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("src/apm_cli/deps/github_downloader.py", ("self.auth_resolver.git_env_for_context(",)),
+        ("src/apm_cli/deps/github_downloader.py", ("self.auth_resolver.git_env_for_remote(",)),
         (
             "src/apm_cli/deps/github_downloader_validation.py",
-            ("downloader.auth_resolver.git_env_for_context(",),
+            ("downloader.auth_resolver.git_env_for_remote(",),
         ),
         (
             "src/apm_cli/install/pipeline.py",
-            ("probe_env = auth_resolver.git_env_for_context(", "key = (host, dep.port, org)"),
+            ("probe_env = auth_resolver.git_env_for_remote(", "key = (host, dep.port, org)"),
         ),
         ("src/apm_cli/install/helpers/ref_reuse.py", ("hardened_git_env_for_context",)),
         (
@@ -335,15 +346,45 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 "def init_git_remote_worktree(",
                 "def git_no_hooks_args(",
                 "def git_remote_refs(",
+                "def clear_git_auth_env(",
+                "def clear_git_platform_token_env(",
+                "def set_git_authorization_header(",
                 "def _append_git_url_rewrites(",
+                "def _materialize_git_config_snapshot(",
                 "def _validated_git_url_rewrite_policy(",
                 "def resolve_git_url_rewrite(",
-                "effective_url, rewrites = _validated_git_url_rewrite_policy(",
+                "effective_url, snapshot = _validated_git_url_rewrite_policy(",
+                'env["GIT_TRACE_REDACT"] = "1"',
+                "_REMOTE_HELPER_RE",
                 "clone_env = git_clone_env(",
                 'return "-c", "core.hooksPath=/dev/null"',
                 "def validate_git_url_rewrite_safety(",
             ),
             "utils/git_env.py must own repository-state and URL rewrite safety",
+        )
+    )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            "src/apm_cli/cache/git_cache.py",
+            (
+                "_FALLBACK_REFSPECS = (",
+                "fallback_fetch_args += [url, *_FALLBACK_REFSPECS]",
+            ),
+            "Fallback fetches must stay bound to the validated remote URL",
+        )
+    )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            ("src/apm_cli/cache/git_cache.py",),
+            re.compile(r"""["']fetch["'][^\n]*["']--all["']"""),
+            "Network fallback must not fetch every configured remote",
+            exempt=False,
         )
     )
     findings.extend(
@@ -387,11 +428,39 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
             exempt=False,
         )
     )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            _src_python(provider, exclude={"src/apm_cli/core/auth.py"}),
+            re.compile(r"AuthResolver\._clear_(?:git_auth|platform_token)_env\("),
+            "Git auth-channel clearing must route through utils/git_env.py",
+            exempt=False,
+        )
+    )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            _src_python(
+                provider,
+                exclude={
+                    "src/apm_cli/core/auth.py",
+                    "src/apm_cli/utils/github_host.py",
+                },
+            ),
+            re.compile(r"set_authorization_header_git_env\("),
+            "Only AuthResolver may select and install a managed Git auth header",
+            exempt=False,
+        )
+    )
     for path, needle in (
         ("src/apm_cli/cache/git_cache.py", "git_clone_env(url, env"),
         (
             "src/apm_cli/deps/bare_cache.py",
-            "                    env = git_network_env(url, env, git_dir=target)",
+            "                    remote_env = git_network_env(url, env, git_dir=target)",
         ),
         ("src/apm_cli/deps/git_file_transport.py", "git_network_env("),
         ("src/apm_cli/deps/git_reference_resolver.py", "git_remote_refs("),
@@ -421,10 +490,43 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
             (
                 "from ..utils.git_env import validate_git_url_rewrite_safety",
                 "validate_git_url_rewrite_safety(remote_url, env)",
+                "from apm_cli.utils.git_env import clear_git_auth_env",
+                "from apm_cli.utils.git_env import clear_git_platform_token_env",
             ),
             "AuthResolver must route URL rewrite safety through utils/git_env.py",
         )
     )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            "src/apm_cli/utils/github_host.py",
+            (
+                "from apm_cli.utils.git_env import set_git_authorization_header",
+                "set_git_authorization_header(env, scheme, credential)",
+            ),
+            "Git authorization config replacement must route through utils/git_env.py",
+        )
+    )
+    for path in (
+        "src/apm_cli/deps/clone_engine.py",
+        "src/apm_cli/deps/download_strategies.py",
+        "src/apm_cli/deps/github_downloader.py",
+        "src/apm_cli/deps/github_downloader_validation.py",
+        "src/apm_cli/install/pipeline.py",
+        "src/apm_cli/install/validation.py",
+    ):
+        findings.extend(
+            _require_subs(
+                provider,
+                inv,
+                _RID_GIT_CHILD_ENV,
+                path,
+                ("git_env_for_remote(",),
+                "Credential environments must apply AuthResolver remote transport policy",
+            )
+        )
     for path, needles in (
         (
             "src/apm_cli/deps/git_auth_env.py",
@@ -873,6 +975,7 @@ RULES: tuple[Rule, ...] = (
         guard_ids=(
             _RID_GIT_CHILD_ENV,
             _RID_GIT_CLONE_HOOKS,
+            _RID_GIT_SINGLE_REMOTE,
             _RID_GIT_URL_CREDENTIALS,
             _RID_GIT_URL_ENFORCEMENT,
             _RID_GIT_URL_ONCE,

@@ -36,7 +36,7 @@ from ..utils.github_host import (
     is_github_hostname,
 )
 from .bare_cache import build_clone_failure_message
-from .transport_selection import TransportAttempt, TransportPlan
+from .transport_selection import ProtocolPreference, TransportAttempt, TransportPlan
 
 if TYPE_CHECKING:
     from ..core.auth import AuthResolver
@@ -153,10 +153,16 @@ class CloneEngine:
         dep_host = dep_ref.host if dep_ref else None
         is_github = is_github_hostname(dep_host) if dep_host else True
         is_generic = not is_ado and not is_github
+        explicit_scheme = (
+            (getattr(dep_ref, "explicit_scheme", None) or "").lower() if dep_ref else ""
+        )
+        candidate_uses_ssh = explicit_scheme == "ssh" or (
+            not explicit_scheme and self._protocol_pref == ProtocolPreference.SSH
+        )
         rewrite_candidate = (
             host._build_repo_url(
                 repo_url_base,
-                use_ssh=False,
+                use_ssh=candidate_uses_ssh,
                 dep_ref=dep_ref,
                 token="",
             )
@@ -205,16 +211,16 @@ class CloneEngine:
 
         def _env_for(attempt: TransportAttempt, attempt_url: str) -> dict[str, str]:
             def _without_platform_credentials(env: dict[str, str]) -> dict[str, str]:
-                from ..core.auth import AuthResolver
+                from ..utils.git_env import clear_git_platform_token_env
 
-                AuthResolver._clear_platform_token_env(env, remove=True)
+                clear_git_platform_token_env(env, remove=True)
                 return env
 
             if attempt.use_token:
                 if dep_auth_ctx is not None:
-                    return host.auth_resolver.git_env_for_context(
+                    return host.auth_resolver.git_env_for_remote(
                         dep_auth_ctx,
-                        base_env=host.git_env,
+                        attempt.effective_url or attempt_url,
                     )
                 host_kind = host.auth_resolver.classify_host(
                     dep_host or default_host(),

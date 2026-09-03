@@ -30,7 +30,8 @@ validate replacement packages before publication. A failed download,
 validation, or activation leaves the previous package and lockfile active;
 fix the reported cause and rerun the command.
 
-`apm install` is safe to invoke from Git hooks; see the
+`apm install` preserves the invoking repository's branch and HEAD when run from
+a Git hook; see the
 [install behavior reference](https://microsoft.github.io/apm/reference/cli/install/#behavior).
 
 For JavaScript hook bundles, `apm install --target copilot` and its

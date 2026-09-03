@@ -71,12 +71,18 @@ def _write_credential_helper(git: Path, home: Path, log_path: Path) -> Path:
         encoding="ascii",
     )
     helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
+    _add_credential_helper(git, home / ".gitconfig", helper)
+    return helper
+
+
+def _add_credential_helper(git: Path, config_path: Path, helper: Path) -> None:
+    """Append the fixture helper to one selected Git config file."""
     subprocess.run(
         (
             str(git),
             "config",
             "--file",
-            str(home / ".gitconfig"),
+            str(config_path),
             "--add",
             "credential.helper",
             f"!{helper}",
@@ -85,7 +91,6 @@ def _write_credential_helper(git: Path, home: Path, log_path: Path) -> Path:
         capture_output=True,
         text=True,
     )
-    return helper
 
 
 def _write_tls_certificate(root: Path) -> tuple[Path, Path]:
@@ -201,6 +206,11 @@ def test_generic_https_marketplace_add_uses_native_credential_helper(
     ).stdout.splitlines()
     assert configured_helpers == ["", f"!{helper}"]
     environment = isolated.subprocess_env()
+    _add_credential_helper(
+        real_git,
+        Path(environment["GIT_CONFIG_GLOBAL"]),
+        helper,
+    )
     environment.update(
         {
             "ADO_APM_PAT": "ado-sentinel",
@@ -297,12 +307,13 @@ def test_generic_https_marketplace_add_rejects_http_rewrite(
     """The installed CLI rejects an HTTPS-to-HTTP Git rewrite safely."""
     isolated = IsolatedApmEnvironment.create(tmp_path / "scenario", base_env=os.environ)
     real_git = _real_git()
+    environment = isolated.subprocess_env()
     subprocess.run(
         (
             str(real_git),
             "config",
             "--file",
-            str(isolated.home / ".gitconfig"),
+            environment["GIT_CONFIG_GLOBAL"],
             "url.http://127.0.0.1:9/.insteadOf",
             "https://gitea.example.test/",
         ),
@@ -310,7 +321,6 @@ def test_generic_https_marketplace_add_rejects_http_rewrite(
         capture_output=True,
         text=True,
     )
-    environment = isolated.subprocess_env()
     environment.update(
         {
             "GITHUB_APM_PAT": "github-apm-sentinel",

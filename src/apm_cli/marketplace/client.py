@@ -572,23 +572,11 @@ def _fetch_git(
 
     from ..cache.git_cache import GitCache
     from ..cache.paths import get_cache_root
+    from ..utils.git_env import GitUrlRewriteError, GitUrlRewriteProbeError
 
     org = source.owner or None
-    try:
-        auth_ctx = (
-            auth_resolver.resolve_for_remote(host_info.host, source.url, org, port=source.port)
-            if source.port is not None
-            else auth_resolver.resolve_for_remote(host_info.host, source.url, org)
-        )
-        git_env = auth_resolver.git_env_for_remote(auth_ctx, source.url)
-    except ValueError as exc:
-        from ..utils.git_env import GitUrlRewriteError
 
-        logger.debug(
-            "Generic-git policy rejected '%s': %s",
-            source.name,
-            type(exc).__name__,
-        )
+    def _rewrite_policy_error(exc: ValueError) -> MarketplaceFetchError:
         reasons = {
             "credentials": "Git URL rewrite contains credentials",
             "credential-origin": "authenticated Git URL rewrite changes the remote origin",
@@ -601,16 +589,31 @@ def _fetch_git(
         reason = (
             reasons.get(exc.reason, "unsafe Git URL rewrite")
             if isinstance(exc, GitUrlRewriteError)
-            else "unable to verify Git URL rewrite safety"
+            else str(exc)
         )
-        raise MarketplaceFetchError(
+        return MarketplaceFetchError(
             source.name,
             reason,
             retry_hint=(
-                "Remove the matching Git url.*.insteadOf rewrite, then run "
+                "Correct the matching Git configuration, then run "
                 f"'apm marketplace update {source.name}' to retry."
             ),
-        ) from exc
+        )
+
+    try:
+        auth_ctx = (
+            auth_resolver.resolve_for_remote(host_info.host, source.url, org, port=source.port)
+            if source.port is not None
+            else auth_resolver.resolve_for_remote(host_info.host, source.url, org)
+        )
+        git_env = auth_resolver.git_env_for_remote(auth_ctx, source.url)
+    except ValueError as exc:
+        logger.debug(
+            "Generic-git policy rejected '%s': %s",
+            source.name,
+            type(exc).__name__,
+        )
+        raise _rewrite_policy_error(exc) from exc
 
     cache = GitCache(get_cache_root(), refresh=False)
     try:
@@ -621,6 +624,9 @@ def _fetch_git(
             env=git_env,
             sparse_paths=[file_path] if "/" in file_path else None,
         )
+    except (GitUrlRewriteError, GitUrlRewriteProbeError) as exc:
+        logger.debug("Generic-git rewrite policy rejected '%s'", source.name)
+        raise _rewrite_policy_error(exc) from exc
     except subprocess.CalledProcessError as exc:
         # Map "object not found" / "couldn't find remote ref" to None so the
         # caller's _auto_detect_path probe can try the next candidate path.

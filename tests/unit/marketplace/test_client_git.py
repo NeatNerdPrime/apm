@@ -341,6 +341,35 @@ def test_fetch_git_wraps_url_rewrite_rejection(
     assert "apm marketplace update acme" in message
 
 
+def test_fetch_git_preserves_cache_stage_rewrite_recovery(
+    tmp_path: Path,
+    fake_host_info,
+    fake_auth_resolver,
+) -> None:
+    """A target-scoped cache rejection keeps the rewrite-specific guidance."""
+    gitcache_mock = MagicMock()
+    gitcache_mock.get_checkout.side_effect = GitUrlRewriteError(
+        "https-downgrade",
+        "HTTPS Git remote must not rewrite to insecure HTTP",
+    )
+    with (
+        patch("apm_cli.cache.git_cache.GitCache", return_value=gitcache_mock),
+        patch("apm_cli.cache.paths.get_cache_root", return_value=tmp_path / "cache"),
+        pytest.raises(MarketplaceFetchError) as raised,
+    ):
+        _fetch_git(
+            _git_source("https://gitea.example.com/org/repo.git"),
+            "marketplace.json",
+            host_info=fake_host_info,
+            auth_resolver=fake_auth_resolver,
+        )
+
+    message = str(raised.value)
+    assert "rewrites it to insecure HTTP" in message
+    assert "Correct the matching Git configuration" in message
+    assert "verify the remote" not in message
+
+
 def test_fetchers_dispatch_table_routes_kinds_to_correct_callable() -> None:
     """Regression trap: locking the trust boundary into _FETCHERS."""
     assert _FETCHERS["git"] is _fetch_git

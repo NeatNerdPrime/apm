@@ -128,8 +128,9 @@ in `apm.yml`, then run `apm install` again.
 - **Git-hook isolation.** Dependency Git operations ignore repository-locating
   variables inherited from an invoking Git hook, preserving the caller's branch
   and HEAD. Safe Git URL rewrites remain available, but APM rejects rewrites
-  that embed credentials, downgrade HTTPS, select `git://` or `ext::`, or move
-  an authenticated HTTPS request to another origin. See
+  that embed credentials, downgrade transport security, select `git://` or
+  remote-helper syntax such as `ext::` and `https::`, or move an authenticated
+  HTTPS request to another origin. See
   [Git URL rewrite safety](../../../getting-started/authentication/#git-url-rewrite-safety).
 - **Instruction frontmatter preflight.** Malformed YAML always rejects the
   package before any of its primitives are deployed. Critical hidden characters

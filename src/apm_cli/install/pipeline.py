@@ -179,21 +179,10 @@ def _preflight_auth_check(ctx, auth_resolver, verbose: bool) -> None:
             token="",
             auth_scheme=_auth_scheme,
         )
-        probe_env = auth_resolver.git_env_for_context(
+        probe_env = auth_resolver.git_env_for_remote(
             dep_ctx,
-            base_env=_dl.git_env,
+            probe_url,
         )
-        # GIT_CONFIG_GLOBAL / GIT_CONFIG_NOSYSTEM carve-out: GitAuthEnvBuilder
-        # forces an empty global gitconfig for ALL hosts to prevent a user's
-        # ~/.gitconfig insteadOf rewrites or credential helpers from leaking
-        # tokens during a clone. But for preflight probes (a single ls-remote
-        # against the same host the dep targets), the redirection surface is
-        # nil and killing the user's global config kills Git Credential
-        # Manager along with it. This carve-out applies only to generic hosts;
-        # ADO credentials come exclusively from AuthResolver.
-        if is_generic:
-            for _key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_ASKPASS"):
-                probe_env.pop(_key, None)
 
         endpoint = dep_ctx.host_info.display_name
         host_display = endpoint if not org else f"{endpoint}/{org}"

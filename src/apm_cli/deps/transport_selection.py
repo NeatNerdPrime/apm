@@ -135,15 +135,16 @@ class GitConfigInsteadOfResolver:
 
     def __init__(self) -> None:
         self._rewrites: list[tuple] | None = None  # list of (insteadof_value, target_base)
-        self._has_authorization = False
+        self._http_headers = ()
         self._lock = threading.Lock()
 
     def resolve(self, candidate_url: str) -> str | None:
         if self._rewrites is None:
             with self._lock:
                 if self._rewrites is None:
-                    self._rewrites, self._has_authorization = self._load_rewrites()
+                    self._rewrites, self._http_headers = self._load_rewrites()
         from ..utils.git_env import (
+            git_url_has_authorization,
             resolve_git_url_rewrite,
             validate_resolved_git_url_rewrite,
         )
@@ -153,12 +154,15 @@ class GitConfigInsteadOfResolver:
             validate_resolved_git_url_rewrite(
                 candidate_url,
                 effective,
-                has_authorization=self._has_authorization,
+                has_authorization=git_url_has_authorization(
+                    effective,
+                    self._http_headers,
+                ),
             )
         return effective
 
     @staticmethod
-    def _load_rewrites() -> tuple[list[tuple], bool]:
+    def _load_rewrites() -> tuple[list[tuple], tuple]:
         """Load all ``url.*.insteadof`` entries from the user's git config.
 
         Returns an empty list if git is missing, exits non-zero, or no
@@ -167,10 +171,10 @@ class GitConfigInsteadOfResolver:
         from ..utils.git_env import configured_git_url_policy
 
         try:
-            rewrites, has_authorization = configured_git_url_policy()
-            return list(rewrites), has_authorization
+            rewrites, http_headers = configured_git_url_policy()
+            return list(rewrites), http_headers
         except (FileNotFoundError, OSError, ValueError):
-            return [], False
+            return [], ()
 
 
 def is_fallback_allowed(cli_flag: bool = False, env: dict | None = None) -> bool:
@@ -210,6 +214,28 @@ def _dedup_attempts(attempts: list[TransportAttempt]) -> list[TransportAttempt]:
         seen.add(key)
         unique_attempts.append(attempt)
     return unique_attempts
+
+
+def _rewrite_attempt(
+    attempt: TransportAttempt,
+    *,
+    requested_url: str | None,
+    effective_url: str | None,
+) -> TransportAttempt:
+    """Attach one configured rewrite to the initial transport attempt."""
+    if requested_url is None or effective_url is None:
+        return attempt
+    parsed = urlsplit(effective_url)
+    effective_scheme = parsed.scheme.lower() or (
+        "ssh" if "@" in effective_url.split(":", 1)[0] else "file"
+    )
+    return TransportAttempt(
+        scheme=effective_scheme,
+        use_token=attempt.use_token and effective_scheme in {"http", "https"},
+        label=f"Git URL rewrite ({effective_scheme})",
+        requested_url=requested_url,
+        effective_url=effective_url,
+    )
 
 
 class TransportSelector:
@@ -252,6 +278,18 @@ class TransportSelector:
             :class:`TransportPlan`.
         """
         explicit = (getattr(dep_ref, "explicit_scheme", None) or "").lower() or None
+        candidate = candidate_url
+        if candidate is None and explicit is None:
+            builder = getattr(dep_ref, "to_github_url", None)
+            candidate = (
+                builder()
+                if callable(builder)
+                else (
+                    f"https://{getattr(dep_ref, 'host', None) or 'github.com'}/"
+                    f"{getattr(dep_ref, 'repo_url', '')}"
+                )
+            )
+        rewrite = self._resolver.resolve(candidate) if candidate is not None else None
 
         # 1. Explicit scheme on the URL wins for the initial attempt.
         #    In strict mode (default) the plan contains exactly that one attempt.
@@ -268,6 +306,13 @@ class TransportSelector:
                 # Never embed a token in http:// URLs.
                 initial = [_HTTP]
                 chained = [_SSH]
+            initial = [
+                _rewrite_attempt(
+                    initial[0],
+                    requested_url=candidate,
+                    effective_url=rewrite,
+                )
+            ]
 
             if not allow_fallback:
                 return TransportPlan(
@@ -284,45 +329,10 @@ class TransportSelector:
 
         # 2. Shorthand (no explicit scheme). Consult the CLI preference and git
         #    insteadOf rewrites to pick the initial protocol.
-        prefer_ssh = cli_pref == ProtocolPreference.SSH
-        prefer_https = cli_pref == ProtocolPreference.HTTPS
-        rewritten_url: str | None = None
-        if cli_pref == ProtocolPreference.NONE:
-            # Callers pass the canonical URL builder's output. The fallback
-            # keeps isolated selector tests and legacy consumers compatible.
-            candidate = candidate_url
-            if candidate is None:
-                builder = getattr(dep_ref, "to_github_url", None)
-                candidate = (
-                    builder()
-                    if callable(builder)
-                    else (
-                        f"https://{getattr(dep_ref, 'host', None) or 'github.com'}/"
-                        f"{getattr(dep_ref, 'repo_url', '')}"
-                    )
-                )
-            rewrite = self._resolver.resolve(candidate)
-            if rewrite and not rewrite.lower().startswith(("https://", "http://")):
-                # Resolver mapped HTTPS -> non-HTTPS form (typically git@host:..). Prefer SSH.
-                prefer_ssh = True
-                rewritten_url = rewrite
-
-        if prefer_ssh:
-            initial = (
-                [
-                    TransportAttempt(
-                        scheme=urlsplit(rewritten_url).scheme.lower() or "ssh",
-                        use_token=False,
-                        label=f"Git URL rewrite ({urlsplit(rewritten_url).scheme or 'ssh'})",
-                        requested_url=candidate,
-                        effective_url=rewritten_url,
-                    )
-                ]
-                if rewritten_url is not None
-                else [_SSH]
-            )
+        if cli_pref == ProtocolPreference.SSH:
+            initial = [_SSH]
             chained = [_AUTH_HTTPS, _PLAIN_HTTPS] if has_token else [_PLAIN_HTTPS]
-        elif prefer_https:
+        elif cli_pref == ProtocolPreference.HTTPS:
             initial = [_AUTH_HTTPS] if has_token else [_PLAIN_HTTPS]
             chained = [_SSH, _PLAIN_HTTPS] if has_token else [_SSH]
         else:
@@ -330,6 +340,13 @@ class TransportSelector:
             # append SSH (and plain HTTPS after auth) below.
             initial = [_AUTH_HTTPS] if has_token else [_PLAIN_HTTPS]
             chained = [_SSH, _PLAIN_HTTPS] if has_token else [_SSH]
+        initial = [
+            _rewrite_attempt(
+                initial[0],
+                requested_url=candidate,
+                effective_url=rewrite,
+            )
+        ]
 
         if not allow_fallback:
             return TransportPlan(

@@ -46,12 +46,13 @@ from ..utils.github_host import (
 )
 from .git_remote_ops import validate_ls_remote_tag_output
 from .github_rate_limit import raise_for_github_throttle
+from .transport_selection import ProtocolPreference
 
 if TYPE_CHECKING:
     import requests
 
     from ..core.auth import AuthResolver
-    from .transport_selection import ProtocolPreference, TransportSelector
+    from .transport_selection import TransportSelector
 
 
 # ---------------------------------------------------------------------------
@@ -144,9 +145,13 @@ class GitReferenceResolver:
 
         is_ado = dep_ref.is_azure_devops()
         repo_url_base = dep_ref.repo_url
+        explicit_scheme = (getattr(dep_ref, "explicit_scheme", None) or "").lower()
+        candidate_uses_ssh = explicit_scheme == "ssh" or (
+            not explicit_scheme and host._protocol_pref == ProtocolPreference.SSH
+        )
         rewrite_candidate = host._build_repo_url(
             repo_url_base,
-            use_ssh=False,
+            use_ssh=candidate_uses_ssh,
             dep_ref=dep_ref,
             token="",
         )
@@ -193,9 +198,9 @@ class GitReferenceResolver:
             remote_url = ""
         elif use_ssh:
             ls_env = host._build_noninteractive_git_env()
-            from ..core.auth import AuthResolver
+            from ..utils.git_env import clear_git_auth_env
 
-            AuthResolver._clear_git_auth_env(ls_env)
+            clear_git_auth_env(ls_env)
             ls_env.pop("GIT_ASKPASS", None)
         elif dep_token and transport_attempt.use_token:
             if dep_auth_ctx is not None:

@@ -34,7 +34,6 @@ from ..utils.github_host import (
     build_ssh_url,
     default_host,
     is_github_hostname,
-    set_authorization_header_git_env,
 )
 from ..utils.path_security import PathTraversalError
 from .artifactory_entry import _NoNetrcSession
@@ -793,10 +792,16 @@ class DownloadDelegate:
             transport = self._git_file_transports.get(key)
             if transport is None:
                 auth_ctx = self._host.auth_resolver.resolve_for_dep(dep_ref)
+                remote_url = self.build_repo_url(
+                    dep_ref.repo_url,
+                    dep_ref=dep_ref,
+                    token="",
+                    auth_scheme=auth_ctx.auth_scheme if auth_ctx is not None else "basic",
+                )
                 git_env = (
-                    self._host.auth_resolver.git_env_for_context(
+                    self._host.auth_resolver.git_env_for_remote(
                         auth_ctx,
-                        base_env=self._host.git_env or {},
+                        remote_url,
                     )
                     if auth_ctx is not None
                     else dict(self._host.git_env or {})
@@ -841,17 +846,10 @@ class DownloadDelegate:
         ):
 
             def _fetch(
-                token: str | None,
+                _token: str | None,
                 git_env: dict[str, str],
             ) -> GitFileFetchResult:
                 attempt_env = dict(git_env)
-                if token:
-                    set_authorization_header_git_env(
-                        attempt_env,
-                        "Bearer",
-                        token,
-                    )
-                    attempt_env.pop("GIT_TOKEN", None)
 
                 def _tokenless_repo_url(
                     repo_ref: str,
@@ -889,27 +887,21 @@ class DownloadDelegate:
             )
 
         auth_ctx = self._host.auth_resolver.resolve_for_dep(dep_ref)
+        remote_url = self.build_repo_url(
+            dep_ref.repo_url,
+            dep_ref=dep_ref,
+            token="",
+            auth_scheme="basic",
+        )
         if auth_ctx.token:
-            # AuthResolver owns credential resolution. Convert its resolved
-            # GitHub credential into Git's header channel so the token remains
-            # out of the remote URL and is actually consumed by git.
-            git_env = dict(auth_ctx.git_env)
-            set_authorization_header_git_env(git_env, "Bearer", auth_ctx.token)
-            git_env.pop("GIT_TOKEN", None)
-            auth_scheme = "basic"
+            git_env = self._host.auth_resolver.git_env_for_remote(auth_ctx, remote_url)
         else:
             # Public repositories use normal non-interactive Git. Do not
             # inherit an unrelated downloader token into this fallback.
             git_env = self._host._build_noninteractive_git_env()
-            auth_scheme = "basic"
 
         def _tokenless_repo_url(repo_ref: str, *, dep_ref: DependencyReference) -> str:
-            return self.build_repo_url(
-                repo_ref,
-                dep_ref=dep_ref,
-                token="",
-                auth_scheme=auth_scheme,
-            )
+            return remote_url
 
         with self._git_file_transports_lock:
             transport = self._git_file_transports.get(key)
@@ -1154,11 +1146,17 @@ class DownloadDelegate:
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             if status in (401, 403):
+                context = self._host.auth_resolver.build_error_context(
+                    host,
+                    "download",
+                    org=owner,
+                    port=dep_ref.port,
+                    dep_url=dep_ref.repo_url,
+                )
                 raise RuntimeError(
                     f"Authentication failed for {dep_ref.repo_url} "
                     f"(file: {file_path}, ref: {ref}). "
-                    "The repository may be private or the resolved credential "
-                    "may lack access."
+                    f"{context}"
                 ) from exc
             if status == 404:
                 raise RuntimeError(

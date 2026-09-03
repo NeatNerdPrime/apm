@@ -29,10 +29,11 @@ Results are cached per-process. Validation, persistent Git cache population, and
 ### Git URL rewrite safety
 
 APM preserves safe `url.<base>.insteadOf` rules, including HTTPS-to-SSH and
-local mirror rewrites. Before any dependency network operation, it rejects a
-matching rewrite that embeds credentials, moves HTTPS to HTTP, `git://`, or
-`ext::`, or redirects an authenticated HTTPS request to another origin. This
-prevents a rewrite from carrying a resolved token to a different endpoint.
+local mirror rewrites. Before each dependency Git operation that consumes a
+remote URL, it rejects a matching rewrite that embeds credentials, downgrades
+transport security, selects remote-helper syntax such as `ext::` or `https::`,
+or redirects an authenticated HTTPS request to another origin. This prevents a
+rewrite from carrying a resolved token to a different endpoint.
 
 If a rewrite is rejected, find its source and remove or replace it:
 
@@ -638,12 +639,11 @@ Authentication and transport are independent decisions:
   select keys or override agent behavior -- whatever `git clone` would do
   on the same machine, APM does.
 
-APM picks the transport per dependency using a strict contract (explicit
-URL scheme honored exactly; shorthand uses HTTPS unless
-`git config url.<base>.insteadOf` rewrites it to SSH). For the full
-selection matrix, the `--ssh` / `--https` flags, the `APM_GIT_PROTOCOL`
-env var, and the `--allow-protocol-fallback` escape hatch, see
-[Manage dependencies: Transport selection](../../consumer/manage-dependencies/).
+APM picks one initial transport per dependency. An explicit URL scheme prevents
+APM from selecting another protocol, while Git still applies matching safe
+`url.<base>.insteadOf` rules afterward. Shorthand defaults to HTTPS unless a
+flag or configuration selects SSH. For the full matrix and fallback escape
+hatch, see [Manage dependencies: Transport selection](../../consumer/manage-dependencies/#transport-selection).
 
 :::caution[Custom ports and cross-protocol fallback]
 When `--allow-protocol-fallback` is in effect, APM reuses the

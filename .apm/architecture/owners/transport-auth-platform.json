@@ -35,11 +35,12 @@
     {
       "id": "git-child-repository-isolation",
       "decision": "Git child-process repository location and URL rewrite safety",
-      "owner": "utils/git_env.py (git_network_env / git_clone_env / git_remote_refs / validate_git_url_rewrite_safety / resolve_git_url_rewrite)",
+      "owner": "utils/git_env.py (network execution config, URL rewrite validation, and Git auth-channel scrubbing)",
       "selectors": ["src/apm_cli/utils/git_env.py"],
       "guards": [
         "transport-platform-git-child-environment",
         "transport-platform-git-clone-hooks-disabled",
+        "transport-platform-git-single-remote-fetch",
         "transport-platform-git-url-credentials-out-of-argv",
         "transport-platform-git-url-rewrite-enforcement",
         "transport-platform-git-url-rewrite-once",

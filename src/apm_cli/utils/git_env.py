@@ -21,9 +21,11 @@ Git state variables stripped after external-process sanitization:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import SplitResult, urlsplit
@@ -32,10 +34,6 @@ from apm_cli.utils.subprocess_env import external_process_env
 
 # Module-level cached git executable path (successful resolutions only).
 _git_executable: str | None = None
-# Keep config inspection independent from tests that replace network subprocess
-# execution. Targeted tests can patch this callable directly when exercising
-# malformed config output.
-_git_config_run = subprocess.run
 _git_init_run = subprocess.run
 
 # Variables that represent ambient git state -- strip these to avoid
@@ -63,6 +61,32 @@ _STRIP_GIT_VARS: frozenset[str] = frozenset(
         "GIT_PREFIX",
     }
 )
+_GIT_CHILD_TOKEN_ENV_NAMES = frozenset(
+    {
+        "ADO_APM_PAT",
+        "ARTIFACTORY_APM_TOKEN",
+        "COPILOT_GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_APM_PAT",
+        "GITHUB_COPILOT_PAT",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "GITHUB_MODELS_KEY",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "GITHUB_TOKEN",
+        "GITLAB_APM_PAT",
+        "GITLAB_TOKEN",
+        "PROXY_REGISTRY_TOKEN",
+    }
+)
+_GIT_CHILD_TOKEN_ENV_PREFIXES = (
+    "APM_REGISTRY_PASS_",
+    "APM_REGISTRY_TOKEN_",
+    "APM_REGISTRY_USER_",
+    "GITHUB_APM_PAT_",
+)
+_AUTH_HEADER_RE = re.compile(r"(?im)(authorization:\s*)[^\r\n]+")
+_REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 
 _URL_REWRITE_RECOVERY = (
     "inspect matching rules with "
@@ -78,6 +102,48 @@ class GitUrlRewriteError(ValueError):
         """Initialize one rejection with a machine-readable reason."""
         self.reason = reason
         super().__init__(f"{message}; {_URL_REWRITE_RECOVERY}")
+
+
+class GitUrlRewriteProbeError(ValueError):
+    """An actionable failure to inspect effective Git configuration."""
+
+    def __init__(self, category: str) -> None:
+        """Initialize a safe probe failure without rendering raw Git output."""
+        self.category = category
+        super().__init__(
+            f"Unable to verify Git URL rewrite safety ({category}); "
+            f"check Git configuration and retry; {_URL_REWRITE_RECOVERY}"
+        )
+
+
+def _run_git_config(
+    command: Sequence[str],
+    *,
+    capture_output: bool,
+    check: bool,
+    cwd: str | None,
+    env: dict[str, str],
+    timeout: int,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run config inspection independently from mocked network subprocesses."""
+    del capture_output, check
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+_git_config_run = _run_git_config
 
 
 def get_git_executable() -> str:
@@ -123,11 +189,18 @@ def git_subprocess_env(overrides: dict[str, object] | None = None) -> dict[str, 
         if overrides is None
         else {key: value for key, value in overrides.items() if isinstance(value, str)}
     )
-    return {
+    env = {
         key: value
         for key, value in external_process_env(base).items()
         if key not in _STRIP_GIT_VARS
     }
+    env["GIT_TRACE_REDACT"] = "1"
+    return env
+
+
+def redact_git_auth_headers(text: str) -> str:
+    """Redact Authorization values from Git diagnostics."""
+    return _AUTH_HEADER_RE.sub(r"\1******", text)
 
 
 def git_subprocess_error_text(exc: BaseException) -> str:
@@ -137,8 +210,49 @@ def git_subprocess_error_text(exc: BaseException) -> str:
             if isinstance(stream, bytes):
                 stream = stream.decode("utf-8", errors="replace")
             if isinstance(stream, str) and stream.strip():
-                return stream.strip()
-    return str(exc)
+                return redact_git_auth_headers(stream.strip())
+    return redact_git_auth_headers(str(exc))
+
+
+def clear_git_platform_token_env(
+    env: dict[str, str],
+    *,
+    remove: bool = False,
+) -> None:
+    """Mask or remove raw platform credential sources from a Git child."""
+    for key in tuple(env):
+        if key in _GIT_CHILD_TOKEN_ENV_NAMES or key.startswith(_GIT_CHILD_TOKEN_ENV_PREFIXES):
+            if remove:
+                env.pop(key, None)
+            else:
+                env[key] = ""
+
+
+def clear_git_auth_env(env: dict[str, str]) -> None:
+    """Remove inherited Git authorization channels while retaining other config."""
+    env.pop("GIT_TOKEN", None)
+    env.pop("GIT_HTTP_EXTRAHEADER", None)
+    env.pop("GIT_CONFIG_PARAMETERS", None)
+    try:
+        count = int(env.pop("GIT_CONFIG_COUNT", "0"))
+    except ValueError:
+        count = 0
+    retained: list[tuple[str, str]] = []
+    for index in range(max(0, count)):
+        key = env.pop(f"GIT_CONFIG_KEY_{index}", "")
+        value = env.pop(f"GIT_CONFIG_VALUE_{index}", "")
+        if "extraheader" in key.lower() or value.strip().lower().startswith("authorization:"):
+            continue
+        if key:
+            retained.append((key, value))
+    for key in tuple(env):
+        if key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            env.pop(key, None)
+    if retained:
+        env["GIT_CONFIG_COUNT"] = str(len(retained))
+        for index, (key, value) in enumerate(retained):
+            env[f"GIT_CONFIG_KEY_{index}"] = key
+            env[f"GIT_CONFIG_VALUE_{index}"] = value
 
 
 def git_no_hooks_args() -> tuple[str, str]:
@@ -153,13 +267,31 @@ class _GitProgress(Protocol):
         """Return a callback that parses one Git progress line."""
 
 
-def _read_effective_git_url_rewrites(
+@dataclass(frozen=True)
+class GitConfigEntry:
+    """One flattened effective Git configuration entry."""
+
+    scope: str
+    key: str
+    value: str
+
+
+@dataclass(frozen=True)
+class _GitConfigSnapshot:
+    """Configuration facts validated for one Git child."""
+
+    entries: tuple[GitConfigEntry, ...]
+    rewrites: tuple[tuple[str, str], ...]
+    http_headers: tuple[GitConfigEntry, ...]
+
+
+def _read_effective_git_config(
     env: dict[str, str],
     *,
     git_dir: Path | None = None,
     worktree: Path | None = None,
-) -> tuple[tuple[tuple[str, str], ...], bool]:
-    """Return visible URL rewrites and whether config injects authorization."""
+) -> _GitConfigSnapshot:
+    """Return the flattened config visible to one Git child."""
     if git_dir is not None and worktree is not None:
         raise ValueError("git_dir and worktree are mutually exclusive")
     command = [get_git_executable()]
@@ -179,8 +311,8 @@ def _read_effective_git_url_rewrites(
         (
             "config",
             "--null",
-            "--get-regexp",
-            r"^(url\..*\.insteadof|http(\..*)?\.extraheader)$",
+            "--show-scope",
+            "--list",
         )
     )
     try:
@@ -192,58 +324,94 @@ def _read_effective_git_url_rewrites(
             env=probe_env,
             timeout=10,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ValueError("Unable to verify Git URL rewrite safety") from exc
-    if result.returncode == 1:
-        return (), False
+    except subprocess.TimeoutExpired as exc:
+        raise GitUrlRewriteProbeError("Git config probe timed out") from exc
+    except OSError as exc:
+        raise GitUrlRewriteProbeError("Git config probe could not start") from exc
     if result.returncode != 0 or not isinstance(result.stdout, bytes):
-        raise ValueError("Unable to verify Git URL rewrite safety")
+        raise GitUrlRewriteProbeError("Git config probe failed")
 
+    fields = tuple(field for field in result.stdout.split(b"\0") if field)
+    if len(fields) % 2:
+        raise GitUrlRewriteProbeError("Git config returned malformed output")
+
+    entries: list[GitConfigEntry] = []
     rewrites: list[tuple[str, str]] = []
-    has_authorization = False
-    for entry in result.stdout.split(b"\0"):
-        if not entry:
-            continue
-        if b"\n" not in entry:
-            raise ValueError("Unable to verify Git URL rewrite safety")
-        key, prefix = entry.split(b"\n", 1)
+    http_headers: list[GitConfigEntry] = []
+    for index in range(0, len(fields), 2):
+        scope, payload = fields[index : index + 2]
+        if b"\n" not in payload:
+            raise GitUrlRewriteProbeError("Git config returned malformed output")
+        key, value = payload.split(b"\n", 1)
         try:
+            scope_text = scope.decode("utf-8")
             key_text = key.decode("utf-8")
-            prefix_text = prefix.decode("utf-8")
+            value_text = value.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ValueError("Unable to verify Git URL rewrite safety") from exc
+            raise GitUrlRewriteProbeError("Git config returned non-UTF-8 output") from exc
+        config_entry = GitConfigEntry(scope_text, key_text, value_text)
+        entries.append(config_entry)
         normalized = key_text.lower()
         if normalized.startswith("http.") or normalized == "http.extraheader":
-            if normalized.endswith(".extraheader") and prefix_text.strip():
-                has_authorization = True
+            if normalized.endswith(".extraheader"):
+                http_headers.append(config_entry)
             continue
         if not normalized.startswith("url.") or not normalized.endswith(".insteadof"):
-            raise ValueError("Unable to verify Git URL rewrite safety")
+            continue
         replacement = key_text[4 : -len(".insteadOf")]
-        if not replacement or not prefix_text:
-            raise ValueError("Unable to verify Git URL rewrite safety")
-        rewrites.append((replacement, prefix_text))
-    return tuple(rewrites), has_authorization
+        if not replacement or not value_text:
+            raise GitUrlRewriteProbeError("Git config returned an incomplete rewrite")
+        rewrites.append((replacement, value_text))
+    return _GitConfigSnapshot(tuple(entries), tuple(rewrites), tuple(http_headers))
 
 
-def _has_forced_http_authorization(env: dict[str, str]) -> bool:
-    """Return whether *env* injects an HTTP authorization header."""
-    normalized_env = {key.upper(): value for key, value in env.items()}
-    if normalized_env.get("GIT_HTTP_EXTRAHEADER", "").strip():
+def _http_extraheader_applies(key: str, remote_url: str) -> bool:
+    """Return whether one Git http.*.extraHeader key applies to a URL."""
+    normalized = key.lower()
+    if normalized == "http.extraheader":
         return True
-    parameters = normalized_env.get("GIT_CONFIG_PARAMETERS", "").lower()
-    if "extraheader" in parameters:
-        return True
+    if not normalized.startswith("http.") or not normalized.endswith(".extraheader"):
+        return False
+    scoped_url = key[len("http.") : -len(".extraheader")]
     try:
-        count = max(0, int(normalized_env.get("GIT_CONFIG_COUNT", "0") or "0"))
+        scoped = urlsplit(scoped_url)
+        remote = urlsplit(remote_url)
+        scoped_origin = _url_origin(scoped_url)
+        remote_origin = _url_origin(remote_url)
     except ValueError:
         return True
-    for index in range(count):
-        key = normalized_env.get(f"GIT_CONFIG_KEY_{index}", "").lower()
-        value = normalized_env.get(f"GIT_CONFIG_VALUE_{index}", "")
-        if key.endswith("extraheader") and value.strip():
-            return True
-    return False
+    if scoped.scheme.lower() not in {"http", "https"} or not scoped.hostname:
+        return True
+    if scoped_origin != remote_origin:
+        return False
+    if scoped.username is not None and scoped.username != remote.username:
+        return False
+    scope_path = scoped.path.rstrip("/")
+    remote_path = remote.path.rstrip("/")
+    return not scope_path or remote_path == scope_path or remote_path.startswith(f"{scope_path}/")
+
+
+def _has_applicable_http_authorization(
+    remote_url: str,
+    headers: Sequence[GitConfigEntry],
+    env: dict[str, str],
+) -> bool:
+    """Return whether effective configuration sends an extra HTTP header."""
+    has_header = bool(env.get("GIT_HTTP_EXTRAHEADER", "").strip())
+    for entry in headers:
+        if not _http_extraheader_applies(entry.key, remote_url):
+            continue
+        has_header = bool(entry.value.strip())
+    return has_header
+
+
+def git_url_has_authorization(
+    remote_url: str,
+    headers: Sequence[GitConfigEntry],
+    env: dict[str, str] | None = None,
+) -> bool:
+    """Return whether flattened Git config sends an HTTP header to a URL."""
+    return _has_applicable_http_authorization(remote_url, headers, env or {})
 
 
 def _url_origin(url: str) -> tuple[str, str, int | None]:
@@ -279,9 +447,10 @@ def resolve_git_url_rewrite(
 
 def configured_git_url_policy(
     env: dict[str, object] | None = None,
-) -> tuple[tuple[tuple[str, str], ...], bool]:
+) -> tuple[tuple[tuple[str, str], ...], tuple[GitConfigEntry, ...]]:
     """Return repository-neutral rewrites and config authorization state."""
-    return _read_effective_git_url_rewrites(git_subprocess_env(env))
+    snapshot = _read_effective_git_config(git_subprocess_env(env))
+    return snapshot.rewrites, snapshot.http_headers
 
 
 def validate_resolved_git_url_rewrite(
@@ -291,6 +460,11 @@ def validate_resolved_git_url_rewrite(
     has_authorization: bool,
 ) -> None:
     """Validate one effective URL selected by Git's rewrite rules."""
+    if _REMOTE_HELPER_RE.match(effective_url):
+        raise GitUrlRewriteError(
+            "insecure-transport",
+            "Git URL rewrite must not select remote-helper syntax",
+        )
     try:
         source = urlsplit(remote_url)
         target = urlsplit(effective_url)
@@ -343,28 +517,32 @@ def _validated_git_url_rewrite_policy(
     *,
     git_dir: Path | None = None,
     worktree: Path | None = None,
-) -> tuple[str | None, tuple[tuple[str, str], ...]]:
+) -> tuple[str | None, _GitConfigSnapshot]:
     """Return one validated effective URL and the exact rewrite snapshot."""
     try:
-        rewrites, config_has_authorization = _read_effective_git_url_rewrites(
+        snapshot = _read_effective_git_config(
             env,
             git_dir=git_dir,
             worktree=worktree,
         )
+    except GitUrlRewriteProbeError:
+        raise
     except ValueError as exc:
-        if str(exc) == "Unable to verify Git URL rewrite safety":
-            raise
-        raise ValueError("Unable to verify Git URL rewrite safety") from exc
+        raise GitUrlRewriteProbeError("Git config could not be interpreted") from exc
 
-    effective_url = resolve_git_url_rewrite(remote_url, rewrites)
+    effective_url = resolve_git_url_rewrite(remote_url, snapshot.rewrites)
     if effective_url is None:
-        return None, rewrites
+        return None, snapshot
     validate_resolved_git_url_rewrite(
         remote_url,
         effective_url,
-        has_authorization=config_has_authorization or _has_forced_http_authorization(env),
+        has_authorization=_has_applicable_http_authorization(
+            effective_url,
+            snapshot.http_headers,
+            env,
+        ),
     )
-    return effective_url, rewrites
+    return effective_url, snapshot
 
 
 def validate_git_url_rewrite_safety(
@@ -375,7 +553,7 @@ def validate_git_url_rewrite_safety(
     worktree: Path | None = None,
 ) -> str | None:
     """Reject credential-bearing or HTTPS-downgrading effective URL rewrites."""
-    effective_url, _ = _validated_git_url_rewrite_policy(
+    effective_url, _snapshot = _validated_git_url_rewrite_policy(
         remote_url,
         env,
         git_dir=git_dir,
@@ -391,8 +569,10 @@ def _append_git_url_rewrites(
     """Materialize URL rewrites in indexed process configuration."""
     try:
         target_count = max(0, int(env.get("GIT_CONFIG_COUNT", "0") or "0"))
-    except ValueError:
-        raise ValueError("Unable to verify Git URL rewrite safety") from None
+    except GitUrlRewriteProbeError:
+        raise
+    except ValueError as exc:
+        raise GitUrlRewriteProbeError("Git config could not be interpreted") from exc
 
     existing = {
         (env.get(f"GIT_CONFIG_KEY_{index}", ""), env.get(f"GIT_CONFIG_VALUE_{index}", ""))
@@ -410,13 +590,80 @@ def _append_git_url_rewrites(
         env["GIT_CONFIG_COUNT"] = str(target_count)
 
 
-def _append_parent_git_config(env: dict[str, str]) -> None:
+def set_git_authorization_header(
+    env: dict[str, str],
+    scheme: str,
+    credential: str,
+) -> None:
+    """Replace Git auth channels with one process-scoped Authorization header."""
+    if "\r" in scheme or "\n" in scheme or "\r" in credential or "\n" in credential:
+        raise ValueError("scheme and credential must not contain CR or LF")
+    clear_git_auth_env(env)
+    try:
+        count = max(0, int(env.get("GIT_CONFIG_COUNT", "0") or "0"))
+    except ValueError:
+        count = 0
+    env["GIT_CONFIG_COUNT"] = str(count + 1)
+    env[f"GIT_CONFIG_KEY_{count}"] = "http.extraheader"
+    env[f"GIT_CONFIG_VALUE_{count}"] = f"Authorization: {scheme} {credential}"
+
+
+def _append_parent_git_config(
+    env: dict[str, str],
+    *,
+    git_dir: Path | None = None,
+    worktree: Path | None = None,
+) -> None:
     """Retain parent URL rewrites without restoring config auth channels."""
     try:
-        parent_rewrites, _ = _read_effective_git_url_rewrites(git_subprocess_env())
-    except ValueError:
-        raise ValueError("Unable to verify Git URL rewrite safety") from None
-    _append_git_url_rewrites(env, parent_rewrites)
+        parent_snapshot = _read_effective_git_config(
+            git_subprocess_env(),
+            git_dir=git_dir,
+            worktree=worktree,
+        )
+    except GitUrlRewriteProbeError:
+        raise
+    except ValueError as exc:
+        raise GitUrlRewriteProbeError("Git config could not be interpreted") from exc
+    _append_git_url_rewrites(env, parent_snapshot.rewrites)
+
+
+def _materialize_git_config_snapshot(
+    env: dict[str, str],
+    snapshot: _GitConfigSnapshot,
+    *,
+    retain_auth: bool,
+) -> None:
+    """Freeze non-local Git config into process entries for execution."""
+    env.pop("GIT_CONFIG_PARAMETERS", None)
+    env.pop("GIT_CONFIG_COUNT", None)
+    for key in tuple(env):
+        if key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            env.pop(key, None)
+
+    retained: list[tuple[str, str]] = []
+    for entry in snapshot.entries:
+        normalized = entry.key.lower()
+        if entry.scope in {"local", "worktree"}:
+            continue
+        if normalized == "include.path" or (
+            normalized.startswith("includeif.") and normalized.endswith(".path")
+        ):
+            continue
+        if not retain_auth and (
+            "extraheader" in normalized or entry.value.strip().lower().startswith("authorization:")
+        ):
+            continue
+        retained.append((entry.key, entry.value))
+
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    if retained:
+        env["GIT_CONFIG_COUNT"] = str(len(retained))
+        for index, (key, value) in enumerate(retained):
+            env[f"GIT_CONFIG_KEY_{index}"] = key
+            env[f"GIT_CONFIG_VALUE_{index}"] = value
 
 
 def git_network_env(
@@ -429,8 +676,8 @@ def git_network_env(
     """Return the canonical validated environment for one network Git URL."""
     env = git_subprocess_env(overrides)
     if overrides is not None:
-        _append_parent_git_config(env)
-    effective_url, rewrites = _validated_git_url_rewrite_policy(
+        _append_parent_git_config(env, git_dir=git_dir, worktree=worktree)
+    effective_url, snapshot = _validated_git_url_rewrite_policy(
         remote_url,
         env,
         git_dir=git_dir,
@@ -438,11 +685,12 @@ def git_network_env(
     )
     transport_url = effective_url or remote_url
     if urlsplit(transport_url).scheme.lower() not in {"http", "https"}:
-        from apm_cli.core.auth import AuthResolver
-
-        AuthResolver._clear_git_auth_env(env)
-        AuthResolver._clear_platform_token_env(env, remove=True)
-        _append_git_url_rewrites(env, rewrites)
+        clear_git_auth_env(env)
+        clear_git_platform_token_env(env, remove=True)
+        retain_auth = False
+    else:
+        retain_auth = True
+    _materialize_git_config_snapshot(env, snapshot, retain_auth=retain_auth)
     return env
 
 
@@ -473,6 +721,21 @@ def git_clone_env(
                     "--quiet",
                     str(target),
                 ],
+                capture_output=True,
+                check=False,
+                env=git_subprocess_env(overrides),
+                timeout=30,
+            )
+            if result.returncode != 0:
+                raise ValueError("Unable to prepare Git clone configuration probe")
+            remote_args = [get_git_executable()]
+            if bare:
+                remote_args.extend(("--git-dir", str(target)))
+            else:
+                remote_args.extend(("-C", str(target)))
+            remote_args.extend(("remote", "add", "origin", remote_url))
+            result = _git_init_run(
+                remote_args,
                 capture_output=True,
                 check=False,
                 env=git_subprocess_env(overrides),
@@ -512,7 +775,7 @@ def git_remote_refs(
     git_executable = get_git_executable()
     command = [git_executable, *git_args, "ls-remote", *options, remote_url, *patterns]
     try:
-        return subprocess.run(
+        result = subprocess.run(
             command,
             capture_output=True,
             cwd=str(Path(git_executable).resolve().parent),
@@ -522,6 +785,15 @@ def git_remote_refs(
             stdin=subprocess.DEVNULL,
             check=check,
         )
+        if isinstance(result.stderr, str):
+            result.stderr = redact_git_auth_headers(result.stderr)
+        return result
+    except subprocess.CalledProcessError as exc:
+        if isinstance(exc.stderr, str):
+            exc.stderr = redact_git_auth_headers(exc.stderr)
+        if isinstance(exc.stdout, str):
+            exc.stdout = redact_git_auth_headers(exc.stdout)
+        raise
     except subprocess.TimeoutExpired:
         # auth-delegated: callers resolve credential and bearer policy before this executor.
         raise subprocess.TimeoutExpired([git_executable, "ls-remote"], timeout) from None
@@ -572,7 +844,7 @@ def init_git_remote_worktree(
             output=result.stdout,
             stderr=result.stderr,
         )
-    return child_env
+    return git_network_env(remote_url, child_env, worktree=worktree)
 
 
 def clone_git_worktree(

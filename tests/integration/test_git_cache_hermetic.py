@@ -17,6 +17,7 @@ import pytest
 
 from apm_cli.cache.git_cache import GitCache, _dir_size, _safe_git_args, _sanitize_url
 from apm_cli.cache.url_normalize import cache_shard_key
+from apm_cli.utils.git_env import _GitConfigSnapshot
 
 
 def _proc(*, returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
@@ -188,7 +189,7 @@ class TestLsRemoteResolve:
         """Keep subprocess mocks focused on ls-remote after policy validation."""
         with patch(
             "apm_cli.utils.git_env._validated_git_url_rewrite_policy",
-            return_value=(None, ()),
+            return_value=(None, _GitConfigSnapshot((), (), ())),
         ):
             yield
 
@@ -349,7 +350,7 @@ class TestEnsureBareRepo:
         """Keep subprocess mocks focused on clone after policy validation."""
         with patch(
             "apm_cli.utils.git_env._validated_git_url_rewrite_policy",
-            return_value=(None, ()),
+            return_value=(None, _GitConfigSnapshot((), (), ())),
         ):
             yield
 
@@ -478,7 +479,7 @@ class TestCreateCheckout:
         """Keep subprocess mocks focused on checkout after policy validation."""
         with patch(
             "apm_cli.utils.git_env._validated_git_url_rewrite_policy",
-            return_value=(None, ()),
+            return_value=(None, _GitConfigSnapshot((), (), ())),
         ):
             yield
 
@@ -697,7 +698,7 @@ class TestFetchIntoBareLocked:
         """Keep subprocess mocks focused on fetch after policy validation."""
         with patch(
             "apm_cli.utils.git_env._validated_git_url_rewrite_policy",
-            return_value=(None, ()),
+            return_value=(None, _GitConfigSnapshot((), (), ())),
         ):
             yield
 
@@ -722,7 +723,7 @@ class TestFetchIntoBareLocked:
             "a" * 40,
         ]
 
-    def test_falls_back_to_fetch_all_when_fetch_by_sha_fails(
+    def test_falls_back_to_explicit_remote_refs_when_fetch_by_sha_fails(
         self, cache: GitCache, tmp_path: Path
     ) -> None:
         bare_dir = tmp_path / "bare.git"
@@ -744,7 +745,9 @@ class TestFetchIntoBareLocked:
             "--git-dir",
             str(bare_dir),
             "fetch",
-            "--all",
+            "https://example.com/repo.git",
+            "+refs/heads/*:refs/remotes/apm-fallback/*",
+            "+refs/tags/*:refs/tags/*",
         ]
 
 

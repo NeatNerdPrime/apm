@@ -76,8 +76,12 @@ def test_auth_failure_is_not_classified_as_filter_rejection() -> None:
     assert _partial_clone_filter_unsupported(failure) is False
 
 
-def test_sparse_cache_hit_validates_promisor_network_environment(tmp_path: Path) -> None:
-    """A sparse repair validates the remote in the checkout's config scope."""
+@pytest.mark.parametrize("dependency_count", (1, 10))
+def test_sparse_cache_hit_defers_promisor_network_environment(
+    tmp_path: Path,
+    dependency_count: int,
+) -> None:
+    """A clean sparse hit performs no Git configuration probe."""
     cache = GitCache(tmp_path / "cache")
     checkout = tmp_path / "checkout"
     checkout.mkdir()
@@ -94,20 +98,25 @@ def test_sparse_cache_hit_validates_promisor_network_environment(tmp_path: Path)
             return_value=None,
         ) as repair,
     ):
-        result = cache._finalize_sparse_checkout(
-            "https://git.example.com/acme/repo",
-            checkout,
-            ["skills/acme"],
-            env=env,
-        )
+        for _ in range(dependency_count):
+            result = cache._finalize_sparse_checkout(
+                "https://git.example.com/acme/repo",
+                checkout,
+                ["skills/acme"],
+                env=env,
+            )
 
     assert result == checkout
+    validate.assert_not_called()
+    assert repair.call_count == dependency_count
+    assert repair.call_args.kwargs["env"]["PATH"] == env["PATH"]
+    repair_env_factory = repair.call_args.kwargs["repair_env_factory"]
+    assert repair_env_factory() == validated_env
     validate.assert_called_once_with(
         "https://git.example.com/acme/repo",
         env,
         worktree=checkout,
     )
-    assert repair.call_args.kwargs["env"] == validated_env
 
 
 def _build_local_bare_repo(tmp_path: Path) -> tuple[Path, str]:

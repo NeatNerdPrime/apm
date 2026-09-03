@@ -197,6 +197,11 @@ class GitSparseFileTransport:
                 worktree=self._work_dir,
             )
             self._run(["git", "remote", "add", "origin", self._auth_url])
+            self._git_env = git_network_env(
+                self._auth_url,
+                self._git_env,
+                worktree=self._work_dir,
+            )
             self._run(["git", "sparse-checkout", "init", "--no-cone"])
             with self._state:
                 requested_paths = tuple(self._requested_paths)

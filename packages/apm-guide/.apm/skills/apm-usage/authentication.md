@@ -9,9 +9,10 @@ Only HTTP 401, 403, 404, or an equivalent Git authentication failure unlocks the
 Managed GitHub, GitLab, and Azure DevOps credentials use process-scoped
 Authorization headers. They are never embedded in Git URL userinfo.
 
-Before a dependency network operation, APM rejects a matching Git URL rewrite
-that embeds credentials, moves HTTPS to HTTP, `git://`, or `ext::`, or redirects
-an authenticated HTTPS request to another origin. Inspect rejected rules with:
+Before each dependency Git operation that consumes a remote URL, APM rejects a
+matching rewrite that embeds credentials, downgrades transport security, selects
+remote-helper syntax such as `ext::` or `https::`, or redirects an authenticated
+HTTPS request to another origin. Inspect rejected rules with:
 
 ```bash
 git config --show-origin --get-regexp '^url\..*\.insteadOf$'

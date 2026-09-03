@@ -129,6 +129,9 @@ def test_github_token_uses_header_not_clone_url(tmp_path: Path) -> None:
     )
     context = host._resolve_dep_auth_ctx.return_value
     context.host_info.kind = "github"
+    host.auth_resolver.git_env_for_remote.side_effect = lambda ctx, _url: (
+        AuthResolver.git_env_for_context(ctx, base_env=host.git_env)
+    )
     host._build_repo_url.side_effect = lambda *_args, **kwargs: (
         f"https://{kwargs['token']}@github.com/owner/repo"
         if kwargs.get("token")
