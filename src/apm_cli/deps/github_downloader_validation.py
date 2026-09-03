@@ -421,14 +421,10 @@ def _build_validation_attempts(
             base_env=downloader.git_env,
         )
     elif host_info is not None:
-        plain_ctx = downloader.auth_resolver.resolve_for_remote(
-            host_info.host,
+        plain_env = downloader.auth_resolver.build_native_git_credential_env(
+            host_info,
             plain_url,
-            dep_ref.repo_url.split("/", 1)[0],
-            port=dep_ref.port,
-            host_type=dep_ref.host_type,
         )
-        plain_env = downloader.auth_resolver.git_env_for_remote(plain_ctx, plain_url)
     else:
         plain_env = downloader._build_noninteractive_git_env(
             preserve_config_isolation=is_insecure,

@@ -88,6 +88,7 @@ _GIT_CHILD_TOKEN_ENV_PREFIXES = (
 _AUTH_HEADER_RE = re.compile(r"(?im)(authorization:\s*)[^\r\n]+")
 _URL_USERINFO_RE = re.compile(r"(https?://)[^/@\s]+@")
 _REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
+_SCP_HOST_RE = re.compile(r"^(?:[^/@:\s]+@)?(\[[^\]]+\]|[^/:@\s]+):")
 
 _URL_REWRITE_RECOVERY = (
     "inspect matching rules with "
@@ -451,6 +452,19 @@ def _url_contains_credentials(parsed: SplitResult) -> bool:
     )
 
 
+def _git_url_host(url: str) -> str | None:
+    """Return the network host from a URL or Git's SCP-style syntax."""
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() in {"http", "https", "ssh"}:
+        return parsed.hostname.lower() if parsed.hostname else None
+    if parsed.scheme:
+        return None
+    match = _SCP_HOST_RE.match(url)
+    if match is None:
+        return None
+    return match.group(1).strip("[]").lower()
+
+
 def resolve_git_url_rewrite(
     remote_url: str,
     rewrites: Sequence[tuple[str, str]],
@@ -528,6 +542,16 @@ def validate_resolved_git_url_rewrite(
             "credential-origin",
             f"Authenticated Git remote must not rewrite to a different "
             f"{target_scheme.upper()} origin",
+        )
+    source_host = _git_url_host(remote_url)
+    target_host = _git_url_host(effective_url)
+    target_is_network = target_scheme in {"http", "https", "ssh"} or (
+        not target_scheme and _SCP_HOST_RE.match(effective_url) is not None
+    )
+    if source_host and target_is_network and source_host != target_host:
+        raise GitUrlRewriteError(
+            "cross-host",
+            "Git remote must not rewrite to a different network host",
         )
 
 
@@ -664,7 +688,7 @@ def _materialize_git_config_snapshot(
     retained: list[tuple[str, str]] = []
     for entry in snapshot.entries:
         normalized = entry.key.lower()
-        if entry.scope in {"local", "worktree"}:
+        if entry.scope in {"local", "worktree"} and not _is_scope_sensitive_network_config(entry):
             continue
         if normalized == "include.path" or (
             normalized.startswith("includeif.") and normalized.endswith(".path")
@@ -684,6 +708,22 @@ def _materialize_git_config_snapshot(
         for index, (key, value) in enumerate(retained):
             env[f"GIT_CONFIG_KEY_{index}"] = key
             env[f"GIT_CONFIG_VALUE_{index}"] = value
+
+
+def _is_scope_sensitive_network_config(entry: GitConfigEntry) -> bool:
+    """Return whether one local entry can affect the validated network child."""
+    normalized = entry.key.lower()
+    return normalized.startswith("http.") or (
+        normalized.startswith("url.") and normalized.endswith(".insteadof")
+    )
+
+
+def _has_scope_sensitive_network_config(snapshot: _GitConfigSnapshot) -> bool:
+    """Return whether materialization must be revalidated with repository config."""
+    return any(
+        entry.scope in {"local", "worktree"} and _is_scope_sensitive_network_config(entry)
+        for entry in snapshot.entries
+    )
 
 
 def git_network_env(
@@ -711,6 +751,17 @@ def git_network_env(
     else:
         retain_auth = True
     _materialize_git_config_snapshot(env, snapshot, retain_auth=retain_auth)
+    if _has_scope_sensitive_network_config(snapshot):
+        materialized_url, _materialized_snapshot = _validated_git_url_rewrite_policy(
+            remote_url,
+            env,
+            git_dir=git_dir,
+            worktree=worktree,
+        )
+        if materialized_url != effective_url:
+            raise GitUrlRewriteProbeError(
+                "materialized Git config changed the effective URL rewrite"
+            )
     return env
 
 

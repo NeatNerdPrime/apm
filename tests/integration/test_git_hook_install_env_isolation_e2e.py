@@ -224,7 +224,7 @@ def test_generic_https_dependency_helper_receives_no_platform_credentials(
         certfile=certificate,
         keyfile=key,
     ) as server:
-        remote_url = "https://git.example.test/acme/generic-dependency.git"
+        remote_url = f"{server.proxy_url}/acme/generic-dependency.git"
         local_url = server.remote_url(repository)
         _configure_git_https_fixture(
             real_git,

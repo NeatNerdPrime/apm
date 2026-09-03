@@ -96,6 +96,7 @@ _PUBLIC_GH_METHODS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^    def uses_public_github_anonymous_first\("),
     re.compile(r"^    def build_public_github_anonymous_git_env\("),
     re.compile(r"^    def build_public_github_authenticated_git_env\("),
+    re.compile(r"^    def build_native_git_credential_env\("),
     re.compile(r"^    def build_noninteractive_git_env\("),
 )
 
@@ -220,6 +221,16 @@ def _check_host_credential_resolution(provider: FactsProvider) -> tuple[Violatio
             inv,
             _RID_HOST_CRED,
             _AUTH_OWNER,
+            ('self._append_git_config(env, "http.extraheader", "")',),
+            "Native-helper validation must reset inherited Authorization headers",
+        )
+    )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_HOST_CRED,
+            _AUTH_OWNER,
             ("lazy_public_github",),
             "AuthResolver must retain the lazy public-github anonymous-first path",
         )
@@ -235,6 +246,16 @@ def _check_host_credential_resolution(provider: FactsProvider) -> tuple[Violatio
                 "Git transport consumers must consult AuthResolver anonymous-first",
             )
         )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_HOST_CRED,
+            "src/apm_cli/deps/github_downloader_validation.py",
+            ("build_native_git_credential_env(",),
+            "Plain validation retries must obtain native-helper policy from AuthResolver",
+        )
+    )
     findings.extend(_check_persistent_cache_branch(provider, inv))
     findings.extend(
         _forbid_scan(
@@ -357,8 +378,11 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 "def _append_git_url_rewrites(",
                 "def _materialize_git_config_snapshot(",
                 "def _validated_git_url_rewrite_policy(",
+                "def _git_url_host(",
                 "def resolve_git_url_rewrite(",
                 "effective_url, snapshot = _validated_git_url_rewrite_policy(",
+                "if source_host and target_is_network and source_host != target_host:",
+                "and not _is_scope_sensitive_network_config(entry)",
                 'env["GIT_TRACE_REDACT"] = "1"',
                 "_REMOTE_HELPER_RE",
                 '"--get-urlmatch"',

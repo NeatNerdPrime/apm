@@ -25,6 +25,8 @@ def _clone_failure_message(
     attempt_scheme: str,
     command_scheme: str | None = None,
     fallback_hint: str | None = None,
+    effective_url: str | None = None,
+    is_generic: bool = False,
 ) -> str:
     """Build a clone failure message for an SSH diagnostic scenario."""
     command_scheme = command_scheme or attempt_scheme
@@ -34,6 +36,7 @@ def _clone_failure_message(
                 scheme=attempt_scheme,
                 use_token=attempt_scheme == "https",
                 label=attempt_scheme.upper(),
+                effective_url=effective_url,
             )
         ],
         strict=True,
@@ -57,7 +60,7 @@ def _clone_failure_message(
         ),
         dep_host="github.com",
         is_ado=False,
-        is_generic=False,
+        is_generic=is_generic,
         has_ado_token=False,
         has_token=False,
         auth_resolver=auth_resolver,
@@ -67,6 +70,22 @@ def _clone_failure_message(
         last_attempt_scheme=attempt_scheme,
         sanitize_git_error=lambda value: value,
     )
+
+
+def test_clone_failure_message_explains_local_mirror_failure() -> None:
+    """A failed file rewrite points to mirror configuration, not host auth."""
+    message = _clone_failure_message(
+        stderr=b"fatal: repository not found\n",
+        attempt_scheme="https",
+        effective_url="file:///fixture/mirror.git",
+        is_generic=True,
+    )
+
+    assert "configured local Git mirror failed" in message
+    assert "path exists and is readable" in message
+    assert "git config --show-origin --get-regexp" in message
+    assert "configure SSH keys" not in message
+    assert "credential helper" not in message
 
 
 def test_clone_failure_message_preserves_rewrite_inspection_command() -> None:

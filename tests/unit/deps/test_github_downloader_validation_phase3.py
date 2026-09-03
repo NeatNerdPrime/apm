@@ -430,6 +430,7 @@ class TestBuildValidationAttempts:
         dl.auth_resolver.resolve_for_dep.return_value.token = "ghp_token"
         dl.auth_resolver.resolve_for_dep.return_value.auth_scheme = "basic"
         dl.auth_resolver.git_env_for_remote.return_value = {"CANONICAL": "github"}
+        dl.auth_resolver.build_native_git_credential_env.return_value = {"NATIVE_HELPER": "github"}
         dep = self._make_dep()
         dep.is_azure_devops.return_value = False
         dl.auth_resolver.classify_host.return_value = MagicMock(kind="github")
@@ -440,6 +441,11 @@ class TestBuildValidationAttempts:
         assert auth_attempts[0].env == {"CANONICAL": "github"}
         dl.auth_resolver.git_env_for_remote.assert_any_call(
             dl.auth_resolver.resolve_for_dep.return_value,
+            "https://github.com/owner/repo.git",
+        )
+        assert attempts[1].env == {"NATIVE_HELPER": "github"}
+        dl.auth_resolver.build_native_git_credential_env.assert_called_once_with(
+            dl.auth_resolver.classify_host.return_value,
             "https://github.com/owner/repo.git",
         )
 

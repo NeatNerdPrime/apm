@@ -1426,6 +1426,34 @@ class AuthResolver:
             validate_git_url_rewrite_safety(remote_url, env)
         return env
 
+    def build_native_git_credential_env(
+        self,
+        host_info: HostInfo,
+        remote_url: str,
+    ) -> dict[str, str]:
+        """Build a header-free Git environment that retains native helpers."""
+        policy = git_transport_policy(host_info.kind, remote_url)
+        env = self.build_noninteractive_git_env(
+            base_env=self.hardened_git_base_env(),
+            host_kind=host_info.kind,
+            preserve_config_isolation=policy.preserve_config_isolation,
+            suppress_credential_helpers=policy.suppress_credential_helpers,
+        )
+        if not policy.suppress_credential_helpers:
+            from apm_cli.utils.git_env import git_subprocess_env
+
+            caller_env = git_subprocess_env()
+            for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"):
+                if name in caller_env:
+                    env[name] = caller_env[name]
+            self._append_git_config(env, "http.extraheader", "")
+        self._clear_platform_token_env(env, remove=True)
+        if policy.reject_https_downgrade:
+            from ..utils.git_env import validate_git_url_rewrite_safety
+
+            validate_git_url_rewrite_safety(remote_url, env)
+        return env
+
     def _generic_credential_lookup_env(self) -> dict[str, str]:
         """Build the token-free native-helper environment for generic hosts."""
         env = self.build_noninteractive_git_env(

@@ -5,10 +5,18 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
 from apm_cli.core.auth import AuthContext, AuthResolver, HostInfo
+from apm_cli.utils.git_env import (
+    GitUrlRewriteError,
+    get_git_executable,
+    git_network_env,
+    resolve_git_url_rewrite,
+    validate_resolved_git_url_rewrite,
+)
 
 _PLATFORM_TOKENS = {
     "ADO_APM_PAT": "ado-sentinel",
@@ -75,6 +83,60 @@ def _context(kind: str) -> AuthContext:
             api_base="https://example.test/api",
         ),
         git_env={},
+    )
+
+
+@pytest.mark.parametrize(
+    "effective_url",
+    (
+        "https://mirror.example/acme/repo",
+        "ssh://git@mirror.example/acme/repo",
+        "git@mirror.example:acme/repo",
+        "ssh:///acme/repo",
+    ),
+)
+def test_resolved_rewrite_rejects_cross_host_network_targets(effective_url: str) -> None:
+    """Pure policy rejects explicit URL, SCP, and hostless SSH targets."""
+    with pytest.raises(GitUrlRewriteError, match="different network host"):
+        validate_resolved_git_url_rewrite(
+            "https://git.example.com/acme/repo",
+            effective_url,
+            has_authorization=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "effective_url",
+    (
+        "ssh://git@git.example.com/acme/repo",
+        "git@git.example.com:acme/repo",
+    ),
+)
+def test_resolved_rewrite_allows_same_host_protocol_change(effective_url: str) -> None:
+    """Pure policy preserves legitimate HTTPS-to-SSH rewrites."""
+    validate_resolved_git_url_rewrite(
+        "https://git.example.com/acme/repo",
+        effective_url,
+        has_authorization=False,
+    )
+
+
+def test_resolve_rewrite_uses_longest_matching_prefix() -> None:
+    """Pure resolution mirrors Git insteadOf longest-match behavior."""
+    effective_url = resolve_git_url_rewrite(
+        "https://git.example.com/acme/repo",
+        (
+            ("https://mirror.example/", "https://git.example.com/"),
+            ("ssh://git@git.example.com/", "https://git.example.com/acme/"),
+        ),
+    )
+
+    assert effective_url is not None
+    parsed = urlsplit(effective_url)
+    assert (parsed.scheme, parsed.hostname, parsed.path) == (
+        "ssh",
+        "git.example.com",
+        "/repo",
     )
 
 
@@ -154,6 +216,154 @@ def test_http_transport_never_receives_resolved_credentials(kind: str, remote_ur
     assert env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert env["GIT_CONFIG_KEY_0"] == "credential.helper"
     assert env["GIT_CONFIG_VALUE_0"] == ""
+
+
+def test_native_credential_env_drops_managed_token_and_retains_helper_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A validation fallback delegates to Git without replaying the managed PAT."""
+    config = tmp_path / "gitconfig"
+    config.write_text(
+        "[credential]\n"
+        "\thelper = fixture-helper\n"
+        "[http]\n"
+        "\textraHeader = Authorization: Basic ambient-sentinel\n",
+        encoding="ascii",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    resolver = AuthResolver(token_manager=_TokenManager())
+
+    env = resolver.build_native_git_credential_env(
+        _context("gitlab").host_info,
+        "https://gitlab.com/org/repo.git",
+    )
+
+    assert env["GIT_CONFIG_GLOBAL"] == str(config)
+    assert "GIT_ASKPASS" not in env
+    assert "GIT_TOKEN" not in env
+    assert "GIT_HTTP_EXTRAHEADER" not in env
+    assert "GITLAB_APM_PAT" not in env
+    entries = [
+        (
+            env.get(f"GIT_CONFIG_KEY_{index}", ""),
+            env.get(f"GIT_CONFIG_VALUE_{index}", ""),
+        )
+        for index in range(int(env.get("GIT_CONFIG_COUNT", "0")))
+    ]
+    assert ("http.extraheader", "") in entries
+    result = subprocess.run(
+        (
+            "git",
+            "config",
+            "--get-urlmatch",
+            "http.extraHeader",
+            "https://gitlab.com/org/repo.git",
+        ),
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    assert result.stdout == b"\n"
+
+
+@pytest.mark.parametrize("reset_scope", ("local", "worktree"))
+def test_local_header_reset_is_frozen_after_snapshot_materialization(
+    tmp_path: Path,
+    reset_scope: str,
+) -> None:
+    """A local/worktree reset cannot restore a global Authorization header."""
+    worktree = tmp_path / "owned-worktree"
+    worktree.mkdir()
+    subprocess.run(
+        ["git", "-C", str(worktree), "init"],
+        check=True,
+        capture_output=True,
+    )
+    if reset_scope == "worktree":
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "config",
+                "extensions.worktreeConfig",
+                "true",
+            ],
+            check=True,
+            capture_output=True,
+        )
+    scope_option = f"--{reset_scope}"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "config",
+            scope_option,
+            "http.extraHeader",
+            "",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    config = tmp_path / "global-gitconfig"
+    config.write_text(
+        '[url "https://git.example.com:8443/"]\n'
+        "\tinsteadOf = https://git.example.com/\n"
+        "[http]\n"
+        "\textraHeader = Authorization: Basic sentinel\n",
+        encoding="ascii",
+    )
+    env = {
+        "PATH": os.environ["PATH"],
+        "GIT_CONFIG_GLOBAL": str(config),
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+
+    child = git_network_env(
+        "https://git.example.com/acme/repo",
+        env,
+        worktree=worktree,
+    )
+
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "config",
+            scope_option,
+            "--unset-all",
+            "http.extraHeader",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    result = subprocess.run(
+        [
+            get_git_executable(),
+            "-C",
+            str(worktree),
+            "config",
+            "--get-urlmatch",
+            "http.extraHeader",
+            "https://git.example.com:8443/acme/repo",
+        ],
+        check=True,
+        capture_output=True,
+        env=child,
+    )
+
+    assert result.stdout == b"\n"
+    entries = [
+        (
+            child.get(f"GIT_CONFIG_KEY_{index}", ""),
+            child.get(f"GIT_CONFIG_VALUE_{index}", ""),
+        )
+        for index in range(int(child["GIT_CONFIG_COUNT"]))
+    ]
+    assert ("http.extraheader", "") in entries
 
 
 @pytest.mark.windows_compat

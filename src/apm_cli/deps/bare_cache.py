@@ -30,6 +30,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from git import Repo
 
@@ -876,18 +877,34 @@ def build_clone_failure_message(
             dep_url=dep_ref.repo_url if dep_ref else None,
         )
     elif is_generic:
-        if dep_host:
-            host_info = auth_resolver.classify_host(
-                dep_host,
-                port=dep_ref.port if dep_ref else None,
+        effective_scheme = last_attempt_scheme
+        for attempt in reversed(plan.attempts):
+            if attempt.scheme != last_attempt_scheme:
+                continue
+            effective_url = getattr(attempt, "effective_url", None)
+            if isinstance(effective_url, str) and effective_url:
+                effective_scheme = urlsplit(effective_url).scheme.lower()
+                break
+        if effective_scheme == "file":
+            error_msg += (
+                "The configured local Git mirror failed. Verify that its path exists "
+                "and is readable, then inspect the matching rule with "
+                "'git config --show-origin --get-regexp ^url\\..*\\.insteadOf$'."
             )
-            host_name = host_info.display_name
         else:
-            host_name = "the target host"
-        error_msg += (
-            f"For private repositories on {host_name}, configure SSH keys or a git credential helper. "
-            f"APM delegates authentication to git for non-GitHub/ADO hosts."
-        )
+            if dep_host:
+                host_info = auth_resolver.classify_host(
+                    dep_host,
+                    port=dep_ref.port if dep_ref else None,
+                )
+                host_name = host_info.display_name
+            else:
+                host_name = "the target host"
+            error_msg += (
+                f"For private repositories on {host_name}, configure SSH keys or a git "
+                "credential helper. APM delegates authentication to git for "
+                "non-GitHub/ADO hosts."
+            )
     elif (
         configured_github_host
         and dep_host

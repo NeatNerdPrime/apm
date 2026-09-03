@@ -620,9 +620,9 @@ MUTATIONS: tuple[MutationCase, ...] = (
         guard_id="transport-platform-git-semver-remote-auth",
         rule_id="transport-platform-git-semver-preflight",
         path="src/apm_cli/install/helpers/ref_reuse.py",
-        old="    if not selected_attempt.use_token:",
-        new="    if selected_attempt.requested_url is not None:",
-        intent="Semver resolution clears auth from every configured URL rewrite.",
+        old="        git_env_factory=resolver_git_env_factory,",
+        new="        git_env=None,",
+        intent="Semver resolution stops creating remote Git environments lazily on cache miss.",
     ),
     MutationCase(
         guard_id="transport-platform-git-single-remote-fetch",

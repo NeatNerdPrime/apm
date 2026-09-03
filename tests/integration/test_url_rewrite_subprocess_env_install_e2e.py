@@ -201,5 +201,5 @@ def test_install_rejects_authenticated_cross_origin_rewrite_before_network(
 
     output = f"{result.stdout}\n{result.stderr}"
     assert result.returncode != 0
-    assert "different HTTPS origin" in output
+    assert "different network host" in output
     assert secret not in output

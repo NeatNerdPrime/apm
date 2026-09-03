@@ -434,13 +434,13 @@ class TestGitSubprocessEnv:
                 env=env,
             )
 
-    def test_clone_allows_cross_origin_rewrite_with_unrelated_scoped_header(
+    def test_clone_allows_port_rewrite_with_unrelated_scoped_header(
         self,
         tmp_path,
     ) -> None:
         config = tmp_path / "gitconfig"
         config.write_text(
-            '[url "https://mirror.example/"]\n'
+            '[url "https://git.example.com:8443/"]\n'
             "\tinsteadOf = https://git.example.com/\n"
             '[http "https://unrelated.example/"]\n'
             "\textraHeader = Authorization: Basic unrelated\n",
@@ -473,11 +473,11 @@ class TestGitSubprocessEnv:
         tmp_path,
         specific_first: bool,
     ) -> None:
-        specific = '[http "https://mirror.example/"]\n\textraHeader =\n'
+        specific = '[http "https://git.example.com:8443/"]\n\textraHeader =\n'
         global_header = "[http]\n\textraHeader = Authorization: Basic sentinel\n"
         config = tmp_path / "gitconfig"
         config.write_text(
-            '[url "https://mirror.example/"]\n'
+            '[url "https://git.example.com:8443/"]\n'
             "\tinsteadOf = https://git.example.com/\n"
             f"{specific if specific_first else global_header}"
             f"{global_header if specific_first else specific}",
@@ -510,13 +510,11 @@ class TestGitSubprocessEnv:
         tmp_path,
         specific_first: bool,
     ) -> None:
-        specific = (
-            '[http "https://mirror.example/"]\n\textraHeader = Authorization: Basic sentinel\n'
-        )
+        specific = '[http "https://git.example.com:8443/"]\n\textraHeader = Authorization: Basic sentinel\n'
         global_reset = "[http]\n\textraHeader =\n"
         config = tmp_path / "gitconfig"
         config.write_text(
-            '[url "https://mirror.example/"]\n'
+            '[url "https://git.example.com:8443/"]\n'
             "\tinsteadOf = https://git.example.com/\n"
             f"{specific if specific_first else global_reset}"
             f"{global_reset if specific_first else specific}",
@@ -611,6 +609,42 @@ class TestGitSubprocessEnv:
             )
 
         assert secret not in str(raised.value)
+
+    @pytest.mark.parametrize(
+        "replacement",
+        (
+            "https://mirror.example/",
+            "ssh://git@mirror.example/",
+            "git@mirror.example:",
+        ),
+    )
+    def test_clone_rejects_cross_host_network_rewrite(
+        self,
+        tmp_path,
+        replacement: str,
+    ) -> None:
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": f"url.{replacement}.insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://git.example.com/",
+        }
+
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ) as run,
+            pytest.raises(GitUrlRewriteError, match="different network host"),
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+        run.assert_not_called()
 
     def test_clone_rejects_authorized_ssh_to_https_rewrite(self, tmp_path) -> None:
         env = {

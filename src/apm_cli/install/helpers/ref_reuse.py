@@ -12,6 +12,7 @@ once per repo instead of once per dep.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -48,6 +49,7 @@ def resolve_dep_auth(
     remote_url: str | None = None,
     unauth_first: bool = False,
     resolved_context: Any = _UNRESOLVED_AUTH_CONTEXT,
+    build_git_env: bool = True,
 ) -> tuple[str | None, str, dict[str, str] | None]:
     """Resolve per-dependency authentication for use by ``git ls-remote``.
 
@@ -64,7 +66,7 @@ def resolve_dep_auth(
             return (
                 None,
                 "basic",
-                auth_resolver.build_public_github_anonymous_git_env(),
+                (auth_resolver.build_public_github_anonymous_git_env() if build_git_env else None),
             )
         auth_ctx = (
             auth_resolver.resolve_for_dep(dep_ref)
@@ -75,7 +77,6 @@ def resolve_dep_auth(
             return None, "basic", None
         remote_env_builder = getattr(auth_resolver, "git_env_for_remote", None)
         if remote_url is not None and callable(remote_env_builder):
-            git_env = remote_env_builder(auth_ctx, remote_url)
             from apm_cli.core.host_providers import git_transport_policy
 
             host_kind = getattr(getattr(auth_ctx, "host_info", None), "kind", None)
@@ -92,9 +93,14 @@ def resolve_dep_auth(
                 )
             policy = git_transport_policy(host_kind, remote_url)
             token = auth_ctx.token if policy.use_resolved_credentials else None
+            git_env = remote_env_builder(auth_ctx, remote_url) if build_git_env else None
         else:
             harden = getattr(auth_resolver, "hardened_git_env_for_context", None)
-            git_env = harden(auth_ctx) if callable(harden) else getattr(auth_ctx, "git_env", None)
+            git_env = (
+                (harden(auth_ctx) if callable(harden) else getattr(auth_ctx, "git_env", None))
+                if build_git_env
+                else None
+            )
             token = auth_ctx.token
         if not token:
             return None, "basic", git_env
@@ -210,6 +216,7 @@ def maybe_resolve_git_semver(
         remote_url=rewrite_candidate,
         unauth_first=anonymous_first,
         resolved_context=resolved_context,
+        build_git_env=False,
     )
     transport_plan = transport_selector.select(
         dep_ref=dep_ref,
@@ -230,22 +237,34 @@ def maybe_resolve_git_semver(
         if selected_scheme != "ssh"
         else f"ssh://{dep_ref.host or 'github.com'}/{dep_ref.repo_url}"
     )
-    resolver_token, auth_scheme, resolver_git_env = resolve_dep_auth(
+    resolver_token, auth_scheme, _resolver_git_env = resolve_dep_auth(
         dep_ref,
         auth_resolver,
         remote_url=policy_url,
         unauth_first=anonymous_first,
         resolved_context=resolved_context,
+        build_git_env=False,
     )
     if not selected_attempt.use_token:
         resolver_token = None
+
+    def resolver_git_env_factory() -> dict[str, str] | None:
+        """Build the remote environment only when the shared resolver is new."""
+        return resolve_dep_auth(
+            dep_ref,
+            auth_resolver,
+            remote_url=policy_url,
+            unauth_first=anonymous_first,
+            resolved_context=resolved_context,
+        )[2]
+
     ref_resolver = get_shared_ref_resolver(
         dep_ref.host,
         resolver_token,
         ref_resolver_cache,
         ref_resolver_cache_lock,
         auth_scheme=auth_scheme,
-        git_env=resolver_git_env,
+        git_env_factory=resolver_git_env_factory,
         auth_resolver=auth_resolver,
         auth_target=dep_ref.host,
         transport_scheme=transport_scheme,
@@ -276,6 +295,7 @@ def get_shared_ref_resolver(
     *,
     auth_scheme: str = "basic",
     git_env: dict[str, str] | None = None,
+    git_env_factory: Callable[[], dict[str, str] | None] | None = None,
     auth_resolver: Any = None,
     auth_target: Any = None,
     transport_scheme: str = "https",
@@ -306,30 +326,36 @@ def get_shared_ref_resolver(
     _DEFAULT_HOST = "github.com"
     canonical_host = host if host and host != _DEFAULT_HOST else None
 
-    resolver_kwargs = {
-        "host": host,
-        "token": token,
-        "auth_scheme": auth_scheme,
-    }
-    if git_env is not None:
-        resolver_kwargs["git_env"] = git_env
-    if auth_resolver is not None:
-        resolver_kwargs.update(
-            auth_resolver=auth_resolver,
-            auth_target=auth_target,
-        )
-    if unauth_first:
-        resolver_kwargs["unauth_first"] = True
-    if transport_scheme == "ssh":
-        resolver_kwargs.update(
-            transport_scheme=transport_scheme,
-            ssh_user=ssh_user,
-        )
-    if port is not None:
-        resolver_kwargs["port"] = port
+    if git_env is not None and git_env_factory is not None:
+        raise ValueError("git_env and git_env_factory are mutually exclusive")
+
+    def build_resolver() -> Any:
+        resolver_kwargs = {
+            "host": host,
+            "token": token,
+            "auth_scheme": auth_scheme,
+        }
+        resolved_git_env = git_env_factory() if git_env_factory is not None else git_env
+        if resolved_git_env is not None:
+            resolver_kwargs["git_env"] = resolved_git_env
+        if auth_resolver is not None:
+            resolver_kwargs.update(
+                auth_resolver=auth_resolver,
+                auth_target=auth_target,
+            )
+        if unauth_first:
+            resolver_kwargs["unauth_first"] = True
+        if transport_scheme == "ssh":
+            resolver_kwargs.update(
+                transport_scheme=transport_scheme,
+                ssh_user=ssh_user,
+            )
+        if port is not None:
+            resolver_kwargs["port"] = port
+        return RefResolver(**resolver_kwargs)
 
     if cache is None:
-        return RefResolver(**resolver_kwargs)
+        return build_resolver()
 
     transport_identity = (
         transport_scheme,
@@ -347,13 +373,13 @@ def get_shared_ref_resolver(
         with lock:
             resolver = cache.get(key)
             if resolver is None:
-                resolver = RefResolver(**resolver_kwargs)
+                resolver = build_resolver()
                 cache[key] = resolver
             return resolver
 
     resolver = cache.get(key)
     if resolver is None:
-        resolver = RefResolver(**resolver_kwargs)
+        resolver = build_resolver()
         cache[key] = resolver
     return resolver
 
