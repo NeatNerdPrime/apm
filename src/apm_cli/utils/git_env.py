@@ -952,7 +952,7 @@ def _build_git_auth_fence(
         and not entry.value.strip()
         for entry in intent.entries
     )
-    if not managed and not reset_headers:
+    if not managed and not reset_headers and not helper_reset:
         return None
 
     selected_group = _urlmatched_header_group(transport_url, snapshot.http_headers, env)

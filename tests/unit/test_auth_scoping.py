@@ -1073,9 +1073,15 @@ class TestValidatePackageExistsEnv:
         assert env_used.get("GIT_ASKPASS") == "echo"
         assert env_used.get("GIT_CONFIG_NOSYSTEM") == "1"
         assert "GIT_CONFIG_GLOBAL" in env_used
-        assert env_used.get("GIT_CONFIG_COUNT") == "1"
-        assert env_used.get("GIT_CONFIG_KEY_0") == "credential.helper"
-        assert env_used.get("GIT_CONFIG_VALUE_0") == ""
+        entries = [
+            (
+                env_used.get(f"GIT_CONFIG_KEY_{index}", ""),
+                env_used.get(f"GIT_CONFIG_VALUE_{index}", ""),
+            )
+            for index in range(int(env_used.get("GIT_CONFIG_COUNT", "0")))
+        ]
+        assert [value for key, value in entries if key.lower() == "credential.helper"] == [""]
+        assert [value for key, value in entries if key.lower().endswith(".extraheader")] == [""]
         assert env_used.get("GIT_TERMINAL_PROMPT") == "0"
 
     @patch(

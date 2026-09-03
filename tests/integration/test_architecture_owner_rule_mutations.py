@@ -680,9 +680,9 @@ MUTATIONS: tuple[MutationCase, ...] = (
         guard_id="transport-platform-git-url-header-specificity-fence",
         rule_id="transport-platform-git-child-environment",
         path="src/apm_cli/utils/git_env.py",
-        old="    clear_git_auth_env(env, remove_helpers=True)",
-        new="    clear_git_auth_env(env)",
-        intent="Managed Git environments retain ambient credential helpers.",
+        old="    if not managed and not reset_headers and not helper_reset:",
+        new="    if not managed and not reset_headers:",
+        intent="Credential-helper-only fences fail to remove ambient helpers.",
     ),
     MutationCase(
         guard_id="transport-platform-git-url-rewrite-enforcement",

@@ -414,6 +414,7 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 '"--get-urlmatch"',
                 "        _build_git_auth_fence(",
                 "intent_snapshot=intent_snapshot",
+                "if not managed and not reset_headers and not helper_reset:",
                 'f"http.{_http_config_scope(auth_fence.remote_url)}.extraheader"',
                 "suppress_helpers=helper_reset or bool(managed)",
                 "clone_env = git_clone_env(",
