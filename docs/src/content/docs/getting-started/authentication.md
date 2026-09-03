@@ -10,7 +10,7 @@ APM works without tokens for public packages on github.com. Authentication is ne
 
 Public `github.com` packages need no token configuration. APM tries HTTPS repository operations anonymously before resolving credentials.
 
-The first attempt has no authorization header, GitHub token environment variable, or active Git credential helper. APM preserves caller-supplied Git config (including URL rewrites and CA settings) while overriding credential helpers and authorization headers for that attempt. A 401, 403, 404, or equivalent Git authentication failure unlocks the credential chain below; DNS, TLS, timeout, and GitHub throttle failures do not.
+The first attempt has no authorization header, GitHub token environment variable, or active Git credential helper. APM preserves caller-supplied Git config, including URL rewrites, CA settings, and non-credential HTTP headers, while removing credential-bearing headers and helpers. A 401, 403, 404, or equivalent Git authentication failure unlocks the credential chain below; DNS, TLS, timeout, and GitHub throttle failures do not.
 
 APM resolves ordinary tokens per `(host, port, org)` scope. When a private `github.com` fallback asks the credential helper for a repository path, that path also scopes the cache entry. APM then walks a **host-class-specific** chain until it finds a token:
 
@@ -19,10 +19,11 @@ APM resolves ordinary tokens per `(host, port, org)` scope. When a private `gith
 3. **ADO-class hosts**: Azure DevOps Services (`dev.azure.com`, `*.visualstudio.com`) uses **only** `ADO_APM_PAT` -> AAD bearer via `az`; Azure DevOps Server hosts listed via `ADO_HOST` / `APM_ADO_HOSTS` use **only** `ADO_APM_PAT`. GitHub and GitLab token env vars are **not** used for ADO-class hosts.
 4. **Generic hosts** (other FQDNs such as Bitbucket): host-specific **git credential helper** or unauthenticated/public access -- **no** GitHub, GitLab, or ADO platform env vars.
 
-Azure DevOps uses its own chain. Azure DevOps Services checks
-`ADO_APM_PAT` -> Azure CLI bearer. Azure DevOps Server checks `ADO_APM_PAT`
-only. See [Azure DevOps](#azure-devops).
-If the resolved token fails for the target host, APM retries with git credential helpers on paths that support it. If nothing matches, APM attempts unauthenticated access where the host exposes public repos (not *ghe.com* Data Residency). Before an anonymous `github.com` attempt, APM disables credential helpers and authorization headers without discarding caller-supplied global/system Git config such as CA paths, URL rewrites, and `credential.interactive=never`.
+If a GitHub- or GitLab-class token fails, supported paths may retry the native
+Git credential chain. ADO never invokes native Git credential helpers: Azure
+DevOps Services retries a rejected `ADO_APM_PAT` with the Azure CLI bearer,
+while Azure DevOps Server remains PAT-only. Hosts with public repositories may
+then allow unauthenticated access according to their provider policy.
 
 Results are cached per-process. Validation, persistent Git cache population, and later fetch phases for the same private repository reuse one path-scoped fallback instead of prompting repeatedly, while another repository can resolve its own credential. APM never writes the credential into persistent cache keys or stored remote URLs. All token-bearing requests use HTTPS.
 
@@ -53,8 +54,10 @@ longest matching rewrite for the remote, passes the flattened snapshot to the
 child process, and disables later reads from mutable global and system files.
 Repository-local config is considered only for APM-owned caches and worktrees
 and its network-relevant entries are copied into the ordered snapshot, then
-revalidated after materialization and before remote use. Later file changes
-cannot remove a validated empty-header reset from the child environment.
+revalidated after materialization and before remote use. Anonymous attempts add
+an empty header at the effective URL; managed attempts add only the
+AuthResolver-selected header at that URL. More-specific ambient headers cannot
+override either fence or follow a request to another repository.
 Dependency clone and init commands ignore Git templates, and checkout hooks
 remain disabled.
 
@@ -331,7 +334,8 @@ apm install dev.azure.com/myorg/myproject/myrepo
 
 `apm marketplace check` uses this same chain for an ADO `marketplace.sourceBase`.
 Azure CLI credentials are passed to `git ls-remote` as a bearer Authorization
-header, never embedded in the repository URL.
+header, never embedded in the repository URL. Validation does not invoke native
+Git credential helpers for ADO.
 
 **Stale-PAT fallback:** if `ADO_APM_PAT` is set but rejected (HTTP 401), APM silently retries with the `az` bearer and emits:
 

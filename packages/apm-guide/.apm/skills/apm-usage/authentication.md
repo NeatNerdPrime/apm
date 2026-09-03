@@ -2,7 +2,7 @@
 
 ## Token precedence chain
 
-For public `github.com` HTTPS repositories, APM makes one anonymous attempt before checking any token source. The attempt removes GitHub token variables, overrides authorization headers and credential helpers with empty values, and preserves caller-supplied global/system Git config such as CA settings, safe URL rewrites, and `credential.interactive=never`.
+For public `github.com` HTTPS repositories, APM makes one anonymous attempt before checking any token source. The attempt removes GitHub token variables, credential-bearing HTTP headers, and credential helpers while preserving CA settings, safe URL rewrites, non-credential HTTP headers, and `credential.interactive=never`.
 
 Only HTTP 401, 403, 404, or an equivalent Git authentication failure unlocks the fallback chain below. DNS, TLS, timeout, and GitHub throttle failures do not prompt for credentials. Private-repository fallback is cached per repository path for the process, so persistent Git cache population and later phases reuse it without applying that credential to a different repository. APM never writes the credential into persistent cache keys or stored remote URLs.
 
@@ -25,11 +25,11 @@ credentials cannot repair a missing local mirror.
 
 APM snapshots effective global and system Git config, selects and validates
 Git's longest matching rewrite for the remote, passes the flattened snapshot to
-the child process, and disables later reads from mutable global and system
-files. Repository-local config is used only in APM-owned caches and worktrees
-and its network-relevant entries are copied into the ordered snapshot, then
-revalidated after materialization and before remote use. Later file changes
-cannot remove a validated empty-header reset from the child environment.
+the child, and disables later reads from mutable config files. Repository-local
+network entries apply only to APM-owned caches and worktrees; APM copies and
+revalidates them before remote use. At the effective URL, anonymous attempts
+add an empty header and managed attempts add only AuthResolver's selection, so
+ambient credentials cannot override or cross repository boundaries.
 Dependency clone and init commands ignore Git templates, and checkout hooks
 remain disabled.
 
@@ -139,7 +139,8 @@ apm install dev.azure.com/org/project/_git/repo
 ```
 
 ADO paths use the 3-segment format: `org/project/repo`. Auth is always required.
-`apm marketplace check` uses this same credential chain. See
+Validation never invokes native Git credential helpers for ADO.
+`apm marketplace check` uses the PAT-to-bearer chain. See
 [Marketplace source bases](package-authoring.md#marketplace-source-bases) for
 ADO marketplace URL authoring.
 
