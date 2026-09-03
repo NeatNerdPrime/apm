@@ -604,8 +604,8 @@ MUTATIONS: tuple[MutationCase, ...] = (
         guard_id="transport-platform-git-url-rewrite-enforcement",
         rule_id="transport-platform-git-child-environment",
         path="src/apm_cli/utils/git_env.py",
-        old="    effective_url = validate_git_url_rewrite_safety(",
-        new="    effective_url = (lambda *_args, **_kwargs: None)(",
+        old="    effective_url, rewrites = _validated_git_url_rewrite_policy(",
+        new="    effective_url, rewrites = (lambda *_args, **_kwargs: (None, ()))(",
         intent="The canonical network environment bypasses URL rewrite validation.",
     ),
     MutationCase(

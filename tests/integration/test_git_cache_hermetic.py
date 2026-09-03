@@ -187,8 +187,8 @@ class TestLsRemoteResolve:
     def _validated_rewrites(self):
         """Keep subprocess mocks focused on ls-remote after policy validation."""
         with patch(
-            "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
-            return_value=None,
+            "apm_cli.utils.git_env._validated_git_url_rewrite_policy",
+            return_value=(None, ()),
         ):
             yield
 
@@ -348,8 +348,8 @@ class TestEnsureBareRepo:
     def _validated_rewrites(self):
         """Keep subprocess mocks focused on clone after policy validation."""
         with patch(
-            "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
-            return_value=None,
+            "apm_cli.utils.git_env._validated_git_url_rewrite_policy",
+            return_value=(None, ()),
         ):
             yield
 
@@ -477,8 +477,8 @@ class TestCreateCheckout:
     def _validated_rewrites(self):
         """Keep subprocess mocks focused on checkout after policy validation."""
         with patch(
-            "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
-            return_value=None,
+            "apm_cli.utils.git_env._validated_git_url_rewrite_policy",
+            return_value=(None, ()),
         ):
             yield
 
@@ -696,8 +696,8 @@ class TestFetchIntoBareLocked:
     def _validated_rewrites(self):
         """Keep subprocess mocks focused on fetch after policy validation."""
         with patch(
-            "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
-            return_value=None,
+            "apm_cli.utils.git_env._validated_git_url_rewrite_policy",
+            return_value=(None, ()),
         ):
             yield
 

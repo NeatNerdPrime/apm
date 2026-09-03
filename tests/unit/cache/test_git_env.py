@@ -14,6 +14,7 @@ from apm_cli.utils.git_env import (
     GitUrlRewriteError,
     clone_git_worktree,
     get_git_executable,
+    git_network_env,
     git_remote_refs,
     git_subprocess_env,
     git_subprocess_error_text,
@@ -756,6 +757,30 @@ class TestGitSubprocessEnv:
         values = {child[key] for key in child if key.startswith("GIT_CONFIG_VALUE_")}
         assert values == {"https://git.example.com/"}
 
+    def test_network_env_reuses_single_validated_rewrite_snapshot(self) -> None:
+        remote_url = "https://git.example.com/acme/repo"
+        rewrites = (("file:///fixture/", "https://git.example.com/"),)
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PATH": os.environ["PATH"],
+                    "GIT_HTTP_EXTRAHEADER": "Authorization: Basic sentinel",
+                },
+                clear=True,
+            ),
+            patch(
+                "apm_cli.utils.git_env._read_effective_git_url_rewrites",
+                return_value=(rewrites, True),
+            ) as read_rewrites,
+        ):
+            child = git_network_env(remote_url)
+
+        read_rewrites.assert_called_once()
+        assert "GIT_HTTP_EXTRAHEADER" not in child
+        assert child["GIT_CONFIG_KEY_0"] == "url.file:///fixture/.insteadOf"
+        assert child["GIT_CONFIG_VALUE_0"] == "https://git.example.com/"
+
     def test_clone_streams_git_progress_to_reporter(self, tmp_path) -> None:
         reporter = MagicMock()
         handler = MagicMock()
@@ -768,8 +793,8 @@ class TestGitSubprocessEnv:
         with (
             patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
             patch(
-                "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
-                return_value=None,
+                "apm_cli.utils.git_env._validated_git_url_rewrite_policy",
+                return_value=(None, ()),
             ),
             patch(
                 "apm_cli.utils.git_env._read_effective_git_url_rewrites", return_value=((), False)
@@ -795,8 +820,8 @@ class TestGitSubprocessEnv:
         token = "secret-timeout-token"
         with (
             patch(
-                "apm_cli.utils.git_env.validate_git_url_rewrite_safety",
-                return_value=None,
+                "apm_cli.utils.git_env._validated_git_url_rewrite_policy",
+                return_value=(None, ()),
             ),
             patch(
                 "apm_cli.utils.git_env.subprocess.run",

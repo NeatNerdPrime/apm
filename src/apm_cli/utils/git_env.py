@@ -337,14 +337,14 @@ def validate_resolved_git_url_rewrite(
         )
 
 
-def validate_git_url_rewrite_safety(
+def _validated_git_url_rewrite_policy(
     remote_url: str,
     env: dict[str, str],
     *,
     git_dir: Path | None = None,
     worktree: Path | None = None,
-) -> str | None:
-    """Reject credential-bearing or HTTPS-downgrading effective URL rewrites."""
+) -> tuple[str | None, tuple[tuple[str, str], ...]]:
+    """Return one validated effective URL and the exact rewrite snapshot."""
     try:
         rewrites, config_has_authorization = _read_effective_git_url_rewrites(
             env,
@@ -358,11 +358,28 @@ def validate_git_url_rewrite_safety(
 
     effective_url = resolve_git_url_rewrite(remote_url, rewrites)
     if effective_url is None:
-        return None
+        return None, rewrites
     validate_resolved_git_url_rewrite(
         remote_url,
         effective_url,
         has_authorization=config_has_authorization or _has_forced_http_authorization(env),
+    )
+    return effective_url, rewrites
+
+
+def validate_git_url_rewrite_safety(
+    remote_url: str,
+    env: dict[str, str],
+    *,
+    git_dir: Path | None = None,
+    worktree: Path | None = None,
+) -> str | None:
+    """Reject credential-bearing or HTTPS-downgrading effective URL rewrites."""
+    effective_url, _ = _validated_git_url_rewrite_policy(
+        remote_url,
+        env,
+        git_dir=git_dir,
+        worktree=worktree,
     )
     return effective_url
 
@@ -413,7 +430,7 @@ def git_network_env(
     env = git_subprocess_env(overrides)
     if overrides is not None:
         _append_parent_git_config(env)
-    effective_url = validate_git_url_rewrite_safety(
+    effective_url, rewrites = _validated_git_url_rewrite_policy(
         remote_url,
         env,
         git_dir=git_dir,
@@ -423,11 +440,6 @@ def git_network_env(
     if urlsplit(transport_url).scheme.lower() not in {"http", "https"}:
         from apm_cli.core.auth import AuthResolver
 
-        rewrites, _ = _read_effective_git_url_rewrites(
-            env,
-            git_dir=git_dir,
-            worktree=worktree,
-        )
         AuthResolver._clear_git_auth_env(env)
         AuthResolver._clear_platform_token_env(env, remove=True)
         _append_git_url_rewrites(env, rewrites)
