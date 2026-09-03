@@ -174,6 +174,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="An Agent Plugin consumer reimplements the reproducible timestamp fallback.",
     ),
     MutationCase(
+        guard_id="contracts-tooling-root-context-write-eligibility",
+        rule_id="contracts-tooling-root-context-write-eligibility",
+        path="src/apm_cli/compilation/agents_compiler.py",
+        old="and self._hand_authored_root_context_blocks_write(output_file)",
+        new="and False",
+        intent="Single-file compilation bypasses the root overwrite eligibility owner.",
+    ),
+    MutationCase(
         guard_id="hooks-integrations-copilot-cli-mcp-paths",
         rule_id="mutation_writes.copilot_cli_mcp_paths",
         path="src/apm_cli/adapters/client/copilot.py",
