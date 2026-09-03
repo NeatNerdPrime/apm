@@ -278,6 +278,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="InstallService stops owning the frozen-install mutation preflight.",
     ),
     MutationCase(
+        guard_id="install-deployment-install-scope-selection",
+        rule_id="install-deployment-install-scope-selection",
+        path="src/apm_cli/commands/install.py",
+        old="user_scope=is_user_scope(scope)",
+        new="user_scope=False",
+        intent="Direct MCP target resolution stops consuming the command's scope decision.",
+    ),
+    MutationCase(
         guard_id="install-deployment-mcp-ownership-migration",
         rule_id="install-deployment-mcp-ownership-migration",
         path="src/apm_cli/install/mcp/ownership.py",

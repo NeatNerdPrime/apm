@@ -25,6 +25,15 @@
 | `apm deps clean` | Clean dependency cache | `--dry-run`, `-y` skip confirm |
 | `apm deps update [PKGS...]` | Deprecated -- use `apm update` instead (now a strict superset). Update specific packages | `--verbose`, `--force`, `--target` (comma-separated), `--parallel-downloads N`, `-g/--global`, `--legacy-skill-paths` |
 
+For `apm install -g --mcp`, mixed target selections warn and skip
+workspace-only runtimes. If no selected target supports user scope, the command
+exits `2` before creating or changing the user manifest, lockfile, or runtime
+configuration.
+
+Positional-package dry-runs retain any bootstrapped manifest for inspection.
+`apm install -g --mcp ... --dry-run` does not create a user manifest, lockfile,
+or runtime configuration.
+
 `apm update`, `apm install --update`, and `apm install --refresh` stage and
 validate replacement packages before publication. A failed download,
 validation, or activation leaves the previous package and lockfile active;
@@ -287,14 +296,14 @@ To build the marketplace, run `apm pack` (it reads `apm.yml` and writes `.claude
 
 | Command | Purpose | Key flags |
 |---------|---------|-----------|
-| `apm mcp install NAME [-- CMD...]` | Add an MCP server (alias for `apm install --mcp`) | `--transport`, `--url`, `--env`, `--header`, `--mcp-version`, `--registry URL`, `--dev`, `--force`, `--dry-run` |
+| `apm mcp install NAME [-- CMD...]` | Add an MCP server (alias for `apm install --mcp`) | `-g`/`--global`, `--target`, `--transport`, `--url`, `--env`, `--header`, `--mcp-version`, `--registry URL`, `--dev`, `--force`, `--dry-run` |
 | `apm mcp list` | List MCP servers in project | `--limit N` |
 | `apm mcp search QUERY` | Search MCP registry | `--limit N` |
 | `apm mcp show SERVER` | Show server details | -- |
 
 Self-defined stdio MCP entries declared in `apm.yml` (`env:` / `args:`) have their placeholders resolved at install time on Codex, Gemini, Antigravity, and Cursor, which have no runtime interpolation. Copilot CLI preserves env references as `${VAR}`; VS Code and JetBrains preserve them as `${env:VAR}`. All three env syntaxes are accepted: `${VAR}`, `${env:VAR}`, and the legacy `<VAR>`. Missing variables fall back to an interactive prompt on install-time targets (suppressed in non-TTY contexts). See [Manifest schema -- MCP placeholder syntaxes](https://microsoft.github.io/apm/reference/manifest-schema/) for the per-target matrix.
 
-Set `MCP_REGISTRY_URL` (default `https://api.mcp.github.com`) to point all `apm mcp` commands and `apm install --mcp` at a custom MCP registry. The URL is validated at startup and must use `https://`; set `MCP_REGISTRY_ALLOW_HTTP=1` to opt in to plaintext `http://` for development. The registry must implement the [MCP Registry v0.1 spec](https://github.com/modelcontextprotocol/registry) (apm calls `/v0.1/servers/...`); legacy `/v0/`-only registries will return 404. When the override is set and the registry is unreachable during install pre-flight, APM fails closed.
+Set `MCP_REGISTRY_URL` (default `https://api.mcp.github.com`) to point all `apm mcp` commands and `apm install --mcp` at a custom MCP registry. The URL is validated at startup and must use `https://`; set `MCP_REGISTRY_ALLOW_HTTP=1` to opt in to plaintext `http://` for development. The registry must implement the [MCP Registry v0.1 spec](https://github.com/modelcontextprotocol/registry) (apm calls `/v0.1/servers/...`); legacy `/v0/`-only registries will return 404. Direct install pre-flight fails closed when any registry is unreachable and accepts a bare server name only when it has one unique registry match.
 
 For a v0.1 package with `registryType: oci`, install generates a `docker`
 launcher automatically. Docker run options stay before the image and
@@ -378,7 +387,7 @@ Experimental flags MUST NOT gate security-critical behaviour (content scanning, 
 
 `apm config set external.<name>.llm true|false` and `apm config set external.<name>.args -- "<flags>"` persist per-scanner external-scanner defaults to `~/.apm/config.json` (JSON section `external_scanners.<name>.{llm,args}`), behind `apm experimental enable external-scanners`. `<name>` is validated against the supported scanners (e.g. `skillspector`). `.args` is shlex-split and stored as a list; use the `--` separator so Click does not parse a leading `--flag` as an option. `apm config get external.<name>.{llm,args}`, `apm config unset external.<name>.{llm,args}`, and `apm config unset external.<name>` (removes both) round out the surface. These keys are reachable only when the flag is enabled; bare `apm config get` lists set external keys when the flag is on. CLI flags (`--external-llm`, `--external-args`) override these values for a single run.
 
-`apm config set mcp-registry-url https://mcp.internal.example.com` persists a private MCP registry URL so users do not need to export `MCP_REGISTRY_URL` every session. Accepts `http://` or `https://` URLs; all other schemes are rejected. Resolution order: `--registry <url>` flag on `apm mcp install` / `apm install --mcp` > `MCP_REGISTRY_URL` env var > `mcp-registry-url` in `~/.apm/config.json` > built-in public default. When the config layer is active, `apm mcp search` prints a `Registry (config): <url>` diagnostic. `apm config unset mcp-registry-url` removes the persisted URL.
+`apm config set mcp-registry-url https://mcp.internal.example.com` persists a private MCP registry URL so users do not need to export `MCP_REGISTRY_URL` every session. Accepts `http://` or `https://` URLs; all other schemes are rejected. A configured `http://` endpoint also requires `MCP_REGISTRY_ALLOW_HTTP=1` when used; an explicit `--registry http://...` flag is the per-invocation opt-in. Resolution order: `--registry <url>` flag on `apm mcp install` / `apm install --mcp` > `MCP_REGISTRY_URL` env var > `mcp-registry-url` in `~/.apm/config.json` > built-in public default. When the config layer is active, `apm mcp search` prints a `Registry (config): <url>` diagnostic. `apm config unset mcp-registry-url` removes the persisted URL.
 
 `apm approve [PACKAGE_REF...]` grants a package permission to deploy executable primitives (hooks, `bin/`, self-defined MCP servers, canvas extensions). By default it writes the project `apm.yml` `executables.allow` block -- committed to source control, so the whole team inherits the trust decision. `apm approve --user` records a personal grant in `~/.apm/config.json` instead (machine-local, never committed, lowest authority -- it can only narrow trust).
 

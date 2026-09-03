@@ -8,6 +8,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 
 import pytest
 
@@ -22,6 +23,7 @@ from tests.utils.local_git_repository import (
     LocalGitRepository,
     LocalGitRepositoryFactory,
 )
+from tests.utils.local_mcp_registry import LocalMcpRegistryFactory
 from tests.utils.local_package import LocalPackageFactory
 
 pytestmark = [
@@ -1191,6 +1193,593 @@ def test_saved_target_drives_direct_mcp_without_target_flag(
     )
     repaired = json.loads((project / ".mcp.json").read_text(encoding="utf-8"))
     assert "saved-direct-mcp" in repaired["mcpServers"]
+
+
+def test_global_direct_mcp_uses_user_manifest_and_runtime_config(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """Global direct MCP install must avoid project-scoped state."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / "global-direct-mcp",
+        base_env=dict(os.environ),
+    )
+    user_manifest = isolated.home / ".apm" / "apm.yml"
+    (isolated.home / ".gemini").mkdir()
+    project = isolated.work_root / "consumer"
+    project.mkdir()
+    (project / ".cursor").mkdir()
+    project_manifest = project / "apm.yml"
+    dump_yaml(
+        {
+            "name": "project-direct",
+            "version": "0.1.0",
+            "targets": ["cursor"],
+            "dependencies": {"mcp": []},
+        },
+        project_manifest,
+    )
+
+    result = _runner(apm_binary_path).run_sequence(
+        (
+            (
+                "install",
+                "-g",
+                "--mcp",
+                "global-direct-server",
+                "--no-policy",
+                "--",
+                "echo",
+                "ready",
+            ),
+        ),
+        expected_returncodes=(0,),
+        scenario_id="global-direct-mcp",
+        cwd=project,
+        env=isolated.subprocess_env(),
+    )[0]
+
+    user_config = load_yaml(user_manifest)
+    assert user_config["dependencies"]["mcp"][0]["name"] == "global-direct-server"
+    project_config = load_yaml(project_manifest)
+    assert project_config["dependencies"]["mcp"] == []
+    gemini_config = json.loads(
+        (isolated.home / ".gemini" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert gemini_config["mcpServers"]["global-direct-server"] == {
+        "args": ["ready"],
+        "command": "echo",
+    }
+    assert "Install interrupted" not in result.stdout + result.stderr
+
+
+def test_configured_mcp_registry_drives_global_direct_install(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """Persisted registry config must reach a real direct MCP integration."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / "configured-direct-registry",
+        base_env=dict(os.environ),
+    )
+    project = isolated.work_root / "consumer"
+    project.mkdir()
+    server_name = "io.github.apm/configured-registry"
+    document = {
+        "name": server_name,
+        "description": "Configured direct registry fixture",
+        "version": "1.0.0",
+        "packages": [
+            {
+                "registryType": "npm",
+                "identifier": "@apm/configured-registry",
+                "runtimeHint": "npx",
+                "transport": {"type": "stdio"},
+                "runtimeArguments": [],
+            }
+        ],
+    }
+    registry_factory = LocalMcpRegistryFactory(isolated.root / "registries")
+
+    with registry_factory.start(document) as registry:
+        parsed_registry = urlparse(registry.url)
+        assert parsed_registry.port is not None
+        environment = isolated.subprocess_env()
+        environment["APM_TEST_LOOPBACK_PORTS"] = str(parsed_registry.port)
+        environment["MCP_REGISTRY_ALLOW_HTTP"] = "0"
+        runner = _runner(apm_binary_path)
+        config_result = runner.run(
+            ("config", "set", "mcp-registry-url", registry.url),
+            scenario_id="configured-global-direct-registry-config",
+            cwd=project,
+            env=environment,
+        )
+        denied = runner.run(
+            (
+                "install",
+                "-g",
+                "--mcp",
+                server_name,
+                "--target",
+                "claude",
+                "--no-policy",
+                "--verbose",
+            ),
+            scenario_id="configured-global-direct-registry-denied",
+            cwd=project,
+            env=environment,
+        )
+        assert config_result.returncode == 0
+        assert denied.returncode == 2
+        assert "MCP_REGISTRY_ALLOW_HTTP=1" in denied.stdout + denied.stderr
+        assert list(registry.request_paths) == []
+
+        (isolated.home / ".apm" / "apm.yml").unlink(missing_ok=True)
+        (isolated.home / ".apm" / "apm.lock.yaml").unlink(missing_ok=True)
+        environment["MCP_REGISTRY_ALLOW_HTTP"] = "1"
+        runner.run_sequence(
+            (
+                (
+                    "install",
+                    "-g",
+                    "--mcp",
+                    server_name,
+                    "--target",
+                    "claude",
+                    "--no-policy",
+                ),
+            ),
+            expected_returncodes=(0,),
+            scenario_id="configured-global-direct-registry",
+            cwd=project,
+            env=environment,
+        )
+
+        assert any(path.startswith("/v0.1/servers?") for path in registry.request_paths)
+        assert any(path.endswith("/versions/latest") for path in registry.request_paths)
+
+    user_manifest = load_yaml(isolated.home / ".apm" / "apm.yml")
+    entry = user_manifest["dependencies"]["mcp"][0]
+    stored_registry = urlparse(entry["registry"])
+    assert (
+        stored_registry.scheme,
+        stored_registry.hostname,
+        stored_registry.port,
+    ) == (
+        parsed_registry.scheme,
+        parsed_registry.hostname,
+        parsed_registry.port,
+    )
+    claude_config = json.loads((isolated.home / ".claude.json").read_text(encoding="utf-8"))
+    assert "configured-registry" in claude_config["mcpServers"]
+
+
+def test_unknown_global_registry_server_changes_no_user_state(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """Registry identity validation must precede every user-scope write."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / "missing-direct-registry",
+        base_env=dict(os.environ),
+    )
+    project = isolated.work_root / "consumer"
+    project.mkdir()
+    document = {
+        "name": "io.github.apm/known-server",
+        "description": "Known registry fixture",
+        "version": "1.0.0",
+        "packages": [],
+    }
+    registry_factory = LocalMcpRegistryFactory(isolated.root / "registries")
+
+    with registry_factory.start(document) as registry:
+        parsed_registry = urlparse(registry.url)
+        assert parsed_registry.port is not None
+        environment = isolated.subprocess_env()
+        environment["APM_TEST_LOOPBACK_PORTS"] = str(parsed_registry.port)
+        result = _runner(apm_binary_path).run(
+            (
+                "install",
+                "-g",
+                "--mcp",
+                "io.github.apm/missing-server",
+                "--target",
+                "claude",
+                "--registry",
+                registry.url,
+                "--no-policy",
+            ),
+            scenario_id="missing-global-direct-registry",
+            cwd=project,
+            env=environment,
+        )
+
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    output = result.stdout + result.stderr
+    assert "Check the server name" in output
+    assert "then retry" in output
+    assert "no state was changed" in output
+    assert not (isolated.home / ".apm" / "apm.yml").exists()
+    assert not (isolated.home / ".apm" / "apm.lock.yaml").exists()
+    assert not (isolated.home / ".claude.json").exists()
+
+
+def test_unreachable_global_registry_changes_no_user_state(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """A connection failure must precede every user-scope write."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / "unreachable-direct-registry",
+        base_env=dict(os.environ),
+    )
+    project = isolated.work_root / "consumer"
+    project.mkdir()
+    document = {
+        "name": "io.github.apm/known-server",
+        "description": "Closed registry fixture",
+        "version": "1.0.0",
+        "packages": [],
+    }
+    registry_factory = LocalMcpRegistryFactory(isolated.root / "registries")
+    with registry_factory.start(document) as registry:
+        registry_url = registry.url
+        registry_port = urlparse(registry_url).port
+        assert registry_port is not None
+
+    environment = isolated.subprocess_env()
+    environment["APM_TEST_LOOPBACK_PORTS"] = str(registry_port)
+    environment["MCP_REGISTRY_ALLOW_HTTP"] = "1"
+    result = _runner(apm_binary_path).run(
+        (
+            "install",
+            "-g",
+            "--mcp",
+            document["name"],
+            "--target",
+            "claude",
+            "--registry",
+            registry_url,
+            "--no-policy",
+        ),
+        scenario_id="unreachable-global-direct-registry",
+        cwd=project,
+        env=environment,
+    )
+
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    output = result.stdout + result.stderr
+    assert "Could not reach MCP registry" in output
+    assert "verify the --registry URL" in output
+    assert "reachability" in output
+    assert "No state was changed." in output
+    assert not (isolated.home / ".apm" / "apm.yml").exists()
+    assert not (isolated.home / ".apm" / "apm.lock.yaml").exists()
+    assert not (isolated.home / ".claude.json").exists()
+
+
+def test_ambient_registry_source_is_pinned_for_replay(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """An ambient private registry becomes credential-free manifest identity."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / "ambient-registry-replay",
+        base_env=dict(os.environ),
+    )
+    project = isolated.work_root / "consumer"
+    project.mkdir()
+    server_name = "io.github.apm/ambient-replay"
+    document = {
+        "name": server_name,
+        "description": "Ambient registry replay fixture",
+        "version": "1.0.0",
+        "packages": [
+            {
+                "registryType": "npm",
+                "identifier": "@apm/ambient-replay",
+                "runtimeHint": "npx",
+                "transport": {"type": "stdio"},
+                "runtimeArguments": [],
+            }
+        ],
+    }
+    registry_factory = LocalMcpRegistryFactory(isolated.root / "registries")
+
+    with registry_factory.start(document) as registry:
+        parsed_registry = urlparse(registry.url)
+        assert parsed_registry.port is not None
+        environment = isolated.subprocess_env()
+        environment["APM_TEST_LOOPBACK_PORTS"] = str(parsed_registry.port)
+        environment["MCP_REGISTRY_ALLOW_HTTP"] = "1"
+        environment["MCP_REGISTRY_URL"] = registry.url
+        runner = _runner(apm_binary_path)
+        runner.run_sequence(
+            (
+                (
+                    "install",
+                    "-g",
+                    "--mcp",
+                    server_name,
+                    "--target",
+                    "claude",
+                    "--no-policy",
+                ),
+            ),
+            expected_returncodes=(0,),
+            scenario_id="ambient-registry-initial",
+            cwd=project,
+            env=environment,
+        )
+        initial_request_count = len(registry.request_paths)
+        environment.pop("MCP_REGISTRY_URL")
+        runner.run_sequence(
+            (("install", "-g", "--only", "mcp", "--target", "claude", "--no-policy"),),
+            expected_returncodes=(0,),
+            scenario_id="ambient-registry-replay",
+            cwd=project,
+            env=environment,
+        )
+        assert len(registry.request_paths) == initial_request_count
+
+        entry = load_yaml(isolated.home / ".apm" / "apm.yml")["dependencies"]["mcp"][0]
+        stored_registry = urlparse(entry["registry"])
+        assert (
+            stored_registry.scheme,
+            stored_registry.hostname,
+            stored_registry.port,
+        ) == (
+            parsed_registry.scheme,
+            parsed_registry.hostname,
+            parsed_registry.port,
+        )
+
+
+def test_global_direct_mcp_filters_mixed_and_rejects_zero_supported_targets(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """User-scope capability filtering precedes state and survives replay."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / "global-target-capability",
+        base_env=dict(os.environ),
+    )
+    project = isolated.work_root / "consumer"
+    project.mkdir()
+    environment = isolated.subprocess_env()
+    runner = _runner(apm_binary_path)
+    user_manifest = isolated.home / ".apm" / "apm.yml"
+
+    rejected = runner.run(
+        (
+            "install",
+            "-g",
+            "--target",
+            "vscode",
+            "--mcp",
+            "rejected-server",
+            "--no-policy",
+            "--",
+            "echo",
+            "rejected",
+        ),
+        scenario_id="global-zero-supported-target",
+        cwd=project,
+        env=environment,
+    )
+
+    assert rejected.returncode == 2
+    assert not user_manifest.exists()
+
+    excluded = runner.run(
+        (
+            "install",
+            "-g",
+            "--target",
+            "claude",
+            "--exclude",
+            "claude",
+            "--mcp",
+            "excluded-server",
+            "--no-policy",
+            "--",
+            "echo",
+            "excluded",
+        ),
+        scenario_id="global-all-targets-excluded",
+        cwd=project,
+        env=environment,
+    )
+    assert excluded.returncode == 2
+    excluded_output = excluded.stdout + excluded.stderr
+    assert "removed by --exclude" in excluded_output
+    assert "remove the exclusion" in excluded_output
+    assert not user_manifest.exists()
+
+    hermes = runner.run(
+        (
+            "install",
+            "-g",
+            "--target",
+            "hermes",
+            "--mcp",
+            "disabled-hermes-server",
+            "--no-policy",
+            "--",
+            "echo",
+            "disabled",
+        ),
+        scenario_id="global-disabled-hermes",
+        cwd=project,
+        env=environment,
+    )
+    assert hermes.returncode == 2
+    assert not user_manifest.exists()
+
+    mixed, replay = runner.run_sequence(
+        (
+            (
+                "install",
+                "-g",
+                "--target",
+                "vscode,claude",
+                "--mcp",
+                "mixed-server",
+                "--no-policy",
+                "--",
+                "echo",
+                "mixed",
+            ),
+            (
+                "install",
+                "-g",
+                "--mcp",
+                "replay-server",
+                "--no-policy",
+                "--",
+                "echo",
+                "replay",
+            ),
+        ),
+        expected_returncodes=(0, 0),
+        scenario_id="global-mixed-target-replay",
+        cwd=project,
+        env=environment,
+    )
+
+    assert "Skipped workspace-only runtimes at user scope: vscode" in (mixed.stdout + mixed.stderr)
+    assert "Skipped workspace-only runtimes" not in replay.stdout + replay.stderr
+    user_config = load_yaml(user_manifest)
+    assert user_config["targets"] == ["claude"]
+    claude_config = json.loads((isolated.home / ".claude.json").read_text(encoding="utf-8"))
+    assert set(claude_config["mcpServers"]) == {"mixed-server", "replay-server"}
+
+    explicitly_excluded = runner.run(
+        (
+            "install",
+            "-g",
+            "--target",
+            "vscode,claude",
+            "--exclude",
+            "vscode",
+            "--mcp",
+            "explicit-exclusion-server",
+            "--no-policy",
+            "--",
+            "echo",
+            "excluded",
+        ),
+        scenario_id="global-workspace-target-explicitly-excluded",
+        cwd=project,
+        env=environment,
+    )
+    assert explicitly_excluded.returncode == 0
+    assert "Skipped workspace-only runtimes" not in (
+        explicitly_excluded.stdout + explicitly_excluded.stderr
+    )
+
+
+def test_global_direct_mcp_dry_run_creates_no_user_state(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """A user-scope preview must not bootstrap any persistent state."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / "global-direct-dry-run",
+        base_env=dict(os.environ),
+    )
+    project = isolated.work_root / "consumer"
+    project.mkdir()
+
+    result = _runner(apm_binary_path).run(
+        (
+            "install",
+            "-g",
+            "--target",
+            "claude",
+            "--mcp",
+            "dry-run-server",
+            "--dry-run",
+            "--no-policy",
+            "--",
+            "echo",
+            "ready",
+        ),
+        scenario_id="global-direct-mcp-dry-run",
+        cwd=project,
+        env=isolated.subprocess_env(),
+    )
+
+    assert result.returncode == 0
+    assert not (isolated.home / ".apm" / "apm.yml").exists()
+    assert not (isolated.home / ".apm" / "apm.lock.yaml").exists()
+    assert not (isolated.home / ".claude.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("ambient_url", "secrets"),
+    (
+        (
+            "https://user:userinfo-secret@registry.example.invalid"
+            "?token=query-secret#fragment-secret",
+            ("userinfo-secret", "query-secret", "fragment-secret"),
+        ),
+        (
+            "https://user:port-secret@registry.example.invalid:notaport",
+            ("port-secret",),
+        ),
+        (
+            "https://registry.example.invalid:bare-port-secret",
+            ("bare-port-secret",),
+        ),
+        (
+            "REGISTRY_SECRET_SENTINEL",
+            ("REGISTRY_SECRET_SENTINEL",),
+        ),
+    ),
+)
+def test_ambient_registry_credentials_never_reach_manifest_or_output(
+    tmp_path: Path,
+    apm_binary_path: Path,
+    ambient_url: str,
+    secrets: tuple[str, ...],
+) -> None:
+    """Ambient registry parse failures redact every credential-bearing component."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / f"ambient-registry-{len(secrets)}",
+        base_env=dict(os.environ),
+    )
+    project = isolated.work_root / "consumer"
+    project.mkdir()
+    environment = isolated.subprocess_env()
+    environment["MCP_REGISTRY_URL"] = ambient_url
+
+    result = _runner(apm_binary_path).run(
+        (
+            "install",
+            "-g",
+            "--target",
+            "claude",
+            "--mcp",
+            "ambient-registry-server",
+            "--no-policy",
+            "--verbose",
+        ),
+        scenario_id="ambient-registry-redaction",
+        cwd=project,
+        env=environment,
+    )
+
+    assert result.returncode == 2
+    combined_output = result.stdout + result.stderr
+    user_manifest_path = isolated.home / ".apm" / "apm.yml"
+    user_manifest = (
+        user_manifest_path.read_text(encoding="utf-8") if user_manifest_path.is_file() else ""
+    )
+    for secret in secrets:
+        assert secret not in combined_output
+        assert secret not in user_manifest
 
 
 def test_saved_target_drives_declared_mcp_and_lsp_without_package(

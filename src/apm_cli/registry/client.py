@@ -99,6 +99,25 @@ _V0_1_PREFIX = "/v0.1"
 _SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)?$")
 
 
+def _safe_registry_url_for_display(value: str) -> str:
+    """Return a credential-free registry URL for diagnostics."""
+    try:
+        parsed = urlparse(value)
+        _ = parsed.port
+        netloc = parsed.netloc
+        if "@" in netloc:
+            netloc = parsed.hostname or ""
+            if parsed.port is not None:
+                netloc = f"{netloc}:{parsed.port}"
+        return parsed._replace(
+            netloc=netloc,
+            query="<redacted>" if parsed.query else "",
+            fragment="<redacted>" if parsed.fragment else "",
+        ).geturl()
+    except (TypeError, ValueError):
+        return "<redacted-invalid-registry-url>"
+
+
 class ServerNotFoundError(ValueError):
     """Raised when a server lookup against the registry returns 404.
 
@@ -152,7 +171,7 @@ def _resolve_timeout() -> tuple:
 class SimpleRegistryClient:
     """Simple client for querying MCP registries for server discovery."""
 
-    def __init__(self, registry_url: str | None = None):
+    def __init__(self, registry_url: str | None = None, registry_source: str | None = None):
         """Initialize the registry client.
 
         Args:
@@ -176,40 +195,55 @@ class SimpleRegistryClient:
         resolved = resolved.strip().rstrip("/")
 
         parsed = urlparse(resolved)
+        safe_resolved = _safe_registry_url_for_display(resolved)
         if not parsed.scheme or not parsed.netloc:
             raise ValueError(
-                f"Invalid MCP registry URL {resolved!r}: expected scheme://host "
+                f"Invalid MCP registry URL {safe_resolved!r}: expected scheme://host "
                 f"(e.g. https://mcp.example.com). Check MCP_REGISTRY_URL if set."
+            )
+        try:
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid MCP registry URL {safe_resolved!r}: invalid port. "
+                "Check MCP_REGISTRY_URL if set."
+            ) from exc
+        if parsed.username or parsed.password:
+            raise ValueError("MCP registry base URLs do not support embedded credentials.")
+        if parsed.query or parsed.fragment:
+            raise ValueError(
+                f"Invalid MCP registry base URL {safe_resolved!r}: "
+                "query strings and fragments are not supported."
             )
         if parsed.scheme not in ("http", "https"):
             raise ValueError(
                 f"Unsupported scheme {parsed.scheme!r} in MCP registry URL "
-                f"{resolved!r}: only https:// is supported (http:// requires "
+                f"{safe_resolved!r}: only https:// is supported (http:// requires "
                 f"MCP_REGISTRY_ALLOW_HTTP=1). Check MCP_REGISTRY_URL if set."
             )
-        if parsed.scheme == "http" and not os.environ.get("MCP_REGISTRY_ALLOW_HTTP"):
+        if parsed.scheme == "http" and os.environ.get("MCP_REGISTRY_ALLOW_HTTP") != "1":
             raise ValueError(
-                f"Insecure MCP registry URL {resolved!r}: http:// is not allowed "
+                f"Insecure MCP registry URL {safe_resolved!r}: http:// is not allowed "
                 f"by default. Set MCP_REGISTRY_ALLOW_HTTP=1 to opt in to plaintext "
                 f"HTTP (not recommended for production). "
                 f"Check MCP_REGISTRY_URL if set."
             )
 
-        # Strip any embedded userinfo (``user:pass@``) before storing the URL so
-        # ``ServerNotFoundError`` and other diagnostics cannot leak credentials
-        # into terminal output or CI logs. Enterprise users sometimes set
-        # ``MCP_REGISTRY_URL=https://token:x-oauth@registry.corp/`` -- we still
-        # accept the URL (the credentials are passed via Authorization headers
-        # elsewhere), but we never echo them back.
-        if parsed.username or parsed.password:
-            host = parsed.hostname or ""
-            sanitized_netloc = host + (f":{parsed.port}" if parsed.port else "")
-            resolved = parsed._replace(netloc=sanitized_netloc).geturl().rstrip("/")
-
         self.registry_url = resolved
         # True when the URL came from an explicit caller arg or MCP_REGISTRY_URL env var.
         # Consumed by validate_servers_exist() to fail-closed on overrides.
         self._is_custom_url = registry_url is not None or env_override is not None
+        source_override = os.environ.get("APM_MCP_REGISTRY_SOURCE")
+        if registry_source in {"flag", "env", "config"}:
+            self.registry_source = registry_source
+        elif registry_url is not None:
+            self.registry_source = "argument"
+        elif env_override is not None and source_override in {"flag", "env", "config"}:
+            self.registry_source = source_override
+        elif env_override is not None:
+            self.registry_source = "env"
+        else:
+            self.registry_source = "default"
         self.session = requests.Session()
         self._timeout = _resolve_timeout()
         self._http_cache = self._init_http_cache()
@@ -373,13 +407,41 @@ class SimpleRegistryClient:
         Raises:
             requests.RequestException: If the request fails.
         """
+        servers, _next_cursor = self._search_servers_page(query)
+        return servers
+
+    def _search_servers_page(
+        self, query: str, cursor: str | None = None
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Return one page from the spec search endpoint."""
         url = f"{self.registry_url}{_V0_1_PREFIX}/servers"
         params = {"search": query}
+        if cursor is not None:
+            params["cursor"] = cursor
 
         data, _hdrs = self._cached_get_json(url, params=params)
         data = data or {}
+        metadata = data.get("metadata", {})
 
-        return self._unwrap_server_list(data)
+        return self._unwrap_server_list(data), metadata.get("nextCursor")
+
+    def _search_servers_all_pages(self, query: str) -> list[dict[str, Any]]:
+        """Search all pages so bare-name uniqueness is checked globally."""
+        all_servers: list[dict[str, Any]] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            servers, next_cursor = self._search_servers_page(query, cursor)
+            all_servers.extend(servers)
+            if not next_cursor:
+                return all_servers
+            if next_cursor in seen_cursors:
+                raise requests.RequestException(
+                    "MCP registry returned a repeated search cursor; "
+                    "cannot prove bare server-name uniqueness"
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
 
     @staticmethod
     def _unwrap_server_list(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -570,8 +632,10 @@ class SimpleRegistryClient:
         Raises:
             requests.RequestException: If the registry API request fails.
         """
-        # Use search API to find by name
-        search_results = self.search_servers(reference)
+        # Use search API to find by name. Fetch every page before applying
+        # the bare-slug uniqueness guard; selecting from only page one would
+        # make dependency-confusion possible when another match sits later.
+        search_results = self._search_servers_all_pages(reference)
 
         # Pass 1: exact full-name match (prevents slug collisions)
         for server in search_results:
@@ -582,14 +646,17 @@ class SimpleRegistryClient:
                 except ValueError:
                     continue
 
-        # Pass 2: fuzzy slug match (only when reference has no namespace)
-        for server in search_results:
-            server_name = server.get("name", "")
-            if self._is_server_match(reference, server_name):
-                try:
-                    return self.get_server(server_name)
-                except ValueError:
-                    continue
+        # Pass 2: an unqualified slug is safe only when it has one match.
+        slug_matches = [
+            server.get("name", "")
+            for server in search_results
+            if self._is_server_match(reference, server.get("name", ""))
+        ]
+        if len(slug_matches) == 1:
+            try:
+                return self.get_server(slug_matches[0])
+            except ValueError:
+                pass
 
         # If not found by name, server is not in registry
         return None

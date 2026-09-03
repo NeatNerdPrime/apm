@@ -73,6 +73,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   semver tag while continuing unrelated updates; malformed remote tag records
   still fail before writes. The contract is recorded in `openapm-v0.1.md`.
   (#2667)
+- `apm install -g --mcp NAME` now creates or updates the user manifest and
+  deploys only to global-capable runtimes instead of rejecting `--global`.
+  Registry identities are validated before user-state writes, fail closed when
+  any registry is unreachable, and reject ambiguous bare names. Registry URLs
+  reject embedded credentials, queries, and fragments; saved or
+  environment-provided HTTP endpoints require explicit opt-in.
+  `openapm-v0.1.md` now codifies the user-scope target-selection and
+  pre-mutation contract. (#2734)
 - Distributed `apm compile` now reconciles existing managed-section
   `AGENTS.md` files without overwriting hand-authored content, generates new
   placements safely, and never discovers, writes, or cleans content across

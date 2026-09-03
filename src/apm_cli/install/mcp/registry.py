@@ -35,27 +35,33 @@ _MAX_REGISTRY_URL_LENGTH = 2048
 
 
 def _redact_url_credentials(url: str) -> str:
-    """Strip ``user:password@`` from a URL before logging it.
+    """Redact URL userinfo, query, and fragment data before logging.
 
-    Registry URLs may legitimately carry credentials for private mirrors
-    (``https://user:token@registry.internal/``); we accept them at the
-    flag layer but never echo them back to the terminal where they could
-    leak via shell history, CI logs, or screenshots.
+    Potentially credential-bearing input is redacted before diagnostics.
+    Embedded credentials are rejected during validation and never echoed to the
+    terminal where they could leak via shell history, CI logs, or screenshots.
 
     Falls back to the original string on any parse error so a misformed
     URL still surfaces in the error message rather than being swallowed.
     """
     try:
         parsed = urlparse(url)
-        if not parsed.netloc or "@" not in parsed.netloc:
-            return url
-        host = parsed.hostname or ""
-        if parsed.port is not None:
-            host = f"{host}:{parsed.port}"
-        sanitized = parsed._replace(netloc=host)
+        if not parsed.scheme or not parsed.netloc:
+            return "<redacted-invalid-registry-url>"
+        parsed_port = parsed.port
+        netloc = parsed.netloc
+        if "@" in netloc:
+            netloc = parsed.hostname or ""
+            if parsed_port is not None:
+                netloc = f"{netloc}:{parsed_port}"
+        sanitized = parsed._replace(
+            netloc=netloc,
+            query="<redacted>" if parsed.query else "",
+            fragment="<redacted>" if parsed.fragment else "",
+        )
         return urlunparse(sanitized)
     except (ValueError, TypeError):
-        return url
+        return "<redacted-invalid-registry-url>"
 
 
 def _is_local_or_metadata_host(host: str | None) -> bool:
@@ -75,6 +81,15 @@ def _is_local_or_metadata_host(host: str | None) -> bool:
     if addr is None:
         return False
     return addr.is_link_local or addr.is_private or addr.is_multicast or addr.is_unspecified
+
+
+def _require_ambient_http_opt_in(url: str, source: str) -> None:
+    """Require the existing explicit opt-in for ambient plaintext endpoints."""
+    if urlparse(url).scheme.lower() == "http" and os.environ.get("MCP_REGISTRY_ALLOW_HTTP") != "1":
+        raise click.UsageError(
+            f"{source} uses plaintext HTTP; set MCP_REGISTRY_ALLOW_HTTP=1 "
+            "only if this endpoint is trusted"
+        )
 
 
 def validate_registry_url(value: str | None) -> str | None:
@@ -116,12 +131,20 @@ def validate_registry_url(value: str | None) -> str | None:
             f"(e.g. https://mcp.internal.example.com)"
         )
     scheme = parsed.scheme.lower()
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise click.UsageError(f"--registry: Invalid URL '{safe_value}': invalid port") from exc
     if scheme not in _ALLOWED_URL_SCHEMES:
         raise click.UsageError(
             f"--registry: Invalid URL '{safe_value}': scheme '{scheme}' is not "
             f"supported; use http:// or https://. WebSocket URLs (ws/wss) "
             f"and file:// paths are rejected for security."
         )
+    if parsed.username is not None:
+        raise click.UsageError("--registry: embedded credentials are not supported")
+    if parsed.query or parsed.fragment:
+        raise click.UsageError("--registry: base URL must not contain a query or fragment")
     return normalized
 
 
@@ -159,6 +182,12 @@ def resolve_registry_url(
         # Defaults are quiet, overrides are visible: surface the env-driven
         # registry redirect so a poisoned MCP_REGISTRY_URL cannot silently
         # change package resolution. Always emitted (not verbose-gated).
+        try:
+            env_value = validate_registry_url(env_value)
+        except click.UsageError as exc:
+            detail = exc.message.removeprefix("--registry: ")
+            raise click.UsageError(f"MCP_REGISTRY_URL is invalid: {detail}") from exc
+        _require_ambient_http_opt_in(env_value, "MCP_REGISTRY_URL")
         if logger is not None:
             logger.progress(
                 f"Using MCP registry: {_redact_url_credentials(env_value)} (from MCP_REGISTRY_URL)",
@@ -172,6 +201,15 @@ def resolve_registry_url(
 
     config_value = _get_mcp_registry_url()
     if config_value:
+        try:
+            config_value = validate_registry_url(config_value)
+        except click.UsageError as exc:
+            detail = exc.message.removeprefix("--registry: ")
+            raise click.UsageError(
+                "Configured mcp-registry-url is invalid; run "
+                f"'apm config unset mcp-registry-url' and retry: {detail}"
+            ) from exc
+        _require_ambient_http_opt_in(config_value, "Configured mcp-registry-url")
         if logger is not None:
             logger.progress(
                 f"Using MCP registry: {_redact_url_credentials(config_value)} (from apm config)",
@@ -202,11 +240,17 @@ def _maybe_warn_local_host(url: str, logger) -> None:
         )
 
 
-_REGISTRY_ENV_KEYS = ("MCP_REGISTRY_URL", "MCP_REGISTRY_ALLOW_HTTP")
+_REGISTRY_SOURCE_ENV_KEY = "APM_MCP_REGISTRY_SOURCE"
+_REGISTRY_ENV_KEYS = ("MCP_REGISTRY_URL", "MCP_REGISTRY_ALLOW_HTTP", _REGISTRY_SOURCE_ENV_KEY)
 
 
 @contextlib.contextmanager
-def registry_env_override(registry_url: str | None) -> Iterator[None]:
+def registry_env_override(
+    registry_url: str | None,
+    *,
+    allow_http: bool = True,
+    source: str | None = None,
+) -> Iterator[None]:
     """Temporarily export ``MCP_REGISTRY_URL`` for the duration of a call.
 
     ``MCPIntegrator.install`` constructs ``MCPServerOperations()`` deep in
@@ -230,7 +274,9 @@ def registry_env_override(registry_url: str | None) -> Iterator[None]:
     saved = {k: os.environ.get(k) for k in _REGISTRY_ENV_KEYS}
     try:
         os.environ["MCP_REGISTRY_URL"] = registry_url
-        if urlparse(registry_url).scheme.lower() == "http":
+        if source in {"flag", "env", "config"}:
+            os.environ[_REGISTRY_SOURCE_ENV_KEY] = source
+        if allow_http and urlparse(registry_url).scheme.lower() == "http":
             os.environ["MCP_REGISTRY_ALLOW_HTTP"] = "1"
         yield
     finally:

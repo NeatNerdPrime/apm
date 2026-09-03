@@ -11,6 +11,7 @@ Covers:
 import typing
 from unittest.mock import MagicMock
 
+import click
 import pytest
 
 from apm_cli.install.mcp.registry import (
@@ -217,6 +218,14 @@ class TestRegistryEnvOverride:
             assert os.environ.get("MCP_REGISTRY_ALLOW_HTTP") == "1"
         assert "MCP_REGISTRY_ALLOW_HTTP" not in os.environ
 
+    def test_http_url_preserves_separate_opt_in_when_disabled(self, monkeypatch):
+        monkeypatch.delenv("MCP_REGISTRY_ALLOW_HTTP", raising=False)
+        import os
+
+        with registry_env_override("http://intranet.example.com", allow_http=False):
+            assert "MCP_REGISTRY_ALLOW_HTTP" not in os.environ
+        assert "MCP_REGISTRY_ALLOW_HTTP" not in os.environ
+
     def test_none_is_no_op(self, monkeypatch):
         monkeypatch.delenv("MCP_REGISTRY_URL", raising=False)
         import os
@@ -231,6 +240,21 @@ class TestValidateRegistryUrl:
 
     def test_https_accepted(self):
         validate_registry_url("https://mcp.example.com")
+
+    def test_credentials_rejected(self):
+        with pytest.raises(click.UsageError, match="embedded credentials are not supported"):
+            validate_registry_url("https://user:secret@mcp.example.com")
+
+    @pytest.mark.parametrize(
+        "url",
+        (
+            "https://mcp.example.com?token=secret",
+            "https://mcp.example.com#token=secret",
+        ),
+    )
+    def test_query_and_fragment_rejected(self, url):
+        with pytest.raises(click.UsageError, match="must not contain a query or fragment"):
+            validate_registry_url(url)
 
     def test_http_accepted(self):
         validate_registry_url("http://intranet.example.com")
@@ -332,10 +356,33 @@ class TestRedactUrlCredentials:
         """End-to-end: B3 env-source diagnostic must redact creds."""
         monkeypatch.setenv("MCP_REGISTRY_URL", "https://u:topsecret@x.example.com/")
         logger = MagicMock()
-        resolve_registry_url(None, logger=logger)
-        msg = logger.progress.call_args.args[0]
-        assert "topsecret" not in msg
-        assert "u:" not in msg
+        with pytest.raises(click.UsageError) as raised:
+            resolve_registry_url(None, logger=logger)
+        assert "topsecret" not in str(raised.value)
+        logger.progress.assert_not_called()
+
+    def test_malformed_ambient_value_is_redacted_from_override_diagnostic(self, monkeypatch):
+        secret = "REGISTRY_SECRET_SENTINEL"
+        monkeypatch.setenv("MCP_REGISTRY_URL", secret)
+        logger = MagicMock()
+
+        resolved, source = resolve_registry_url("https://registry.example.com", logger=logger)
+
+        assert resolved == "https://registry.example.com"
+        assert source == "flag"
+        message = logger.progress.call_args.args[0]
+        assert secret not in message
+        assert "<redacted-invalid-registry-url>" in message
+
+    def test_malformed_ambient_value_is_redacted_from_validation_error(self, monkeypatch):
+        secret = "REGISTRY_SECRET_SENTINEL"
+        monkeypatch.setenv("MCP_REGISTRY_URL", secret)
+
+        with pytest.raises(click.UsageError) as raised:
+            resolve_registry_url(None)
+
+        assert secret not in str(raised.value)
+        assert "<redacted-invalid-registry-url>" in str(raised.value)
 
 
 class TestSsrfWarning:
