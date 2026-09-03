@@ -547,6 +547,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="A manifest consumer reads raw targets instead of canonical_targets.",
     ),
     MutationCase(
+        guard_id="transport-platform-ado-validation-bearer-fallback",
+        rule_id="transport-platform-host-credential-resolution",
+        path="src/apm_cli/install/validation.py",
+        old="        fallback = auth_resolver.execute_with_bearer_fallback(",
+        new="        fallback = _bypass_ado_bearer_fallback(",
+        intent="Install validation bypasses canonical ADO PAT-to-bearer fallback.",
+    ),
+    MutationCase(
         guard_id="transport-platform-artifactory-full-commit-sha",
         rule_id="transport-platform-artifactory-full-commit-sha",
         path="src/apm_cli/utils/github_host.py",
@@ -609,6 +617,26 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Sparse Git failures expose Authorization header values.",
     ),
     MutationCase(
+        guard_id="transport-platform-git-diagnostic-sanitizer-ownership",
+        rule_id="transport-platform-git-child-environment",
+        path="src/apm_cli/deps/github_downloader_validation.py",
+        old='_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")',
+        new=(
+            '_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")\n\n'
+            "def _sanitize_git_error(value: str) -> str:\n"
+            "    return value"
+        ),
+        intent="A downloader helper introduces a competing Git diagnostic sanitizer.",
+    ),
+    MutationCase(
+        guard_id="transport-platform-git-diagnostic-token-shapes",
+        rule_id="transport-platform-git-child-environment",
+        path="src/apm_cli/utils/git_env.py",
+        old="github_pat_",
+        new="github_bad_",
+        intent="Fine-grained GitHub PATs stop being redacted from Git diagnostics.",
+    ),
+    MutationCase(
         guard_id="transport-platform-git-semver-preflight",
         rule_id="transport-platform-git-semver-preflight",
         path="src/apm_cli/install/helpers/ref_reuse.py",
@@ -649,6 +677,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Git URL-scoped header precedence falls back to config order.",
     ),
     MutationCase(
+        guard_id="transport-platform-git-url-header-specificity-fence",
+        rule_id="transport-platform-git-child-environment",
+        path="src/apm_cli/utils/git_env.py",
+        old="    clear_git_auth_env(env, remove_helpers=True)",
+        new="    clear_git_auth_env(env)",
+        intent="Managed Git environments retain ambient credential helpers.",
+    ),
+    MutationCase(
         guard_id="transport-platform-git-url-rewrite-enforcement",
         rule_id="transport-platform-git-child-environment",
         path="src/apm_cli/utils/git_env.py",
@@ -666,6 +702,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         old="                url = attempt.requested_url",
         new="                url = attempt.effective_url",
         intent="Clone execution applies an already-resolved URL rewrite a second time.",
+    ),
+    MutationCase(
+        guard_id="transport-platform-git-url-rewrite-recovery",
+        rule_id="transport-platform-git-child-environment",
+        path="src/apm_cli/marketplace/client.py",
+        old='            reason = f"{reason}; {exc.recovery_hint}"',
+        new="            reason = reason",
+        intent="Marketplace wrapping drops the safe Git rewrite inspection command.",
     ),
     MutationCase(
         guard_id="transport-platform-git-url-rewrite-routing",

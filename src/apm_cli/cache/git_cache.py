@@ -938,23 +938,8 @@ def _dir_size(path: Path) -> int:
     return total
 
 
-_DIAGNOSTIC_URL_RE = re.compile(r"(?i)\b(?:https?|ssh|git)://[^\s'\"<>]+")
-
-
 def _sanitize_url(value: str) -> str:
-    """Remove URL userinfo, query, and fragment data from diagnostics."""
-    import urllib.parse
+    """Delegate Git diagnostic redaction to its canonical owner."""
+    from ..utils.git_env import redact_git_diagnostic
 
-    def _redact(match: re.Match[str]) -> str:
-        try:
-            parsed = urllib.parse.urlparse(match.group(0))
-            host = parsed.hostname or ""
-            if ":" in host:
-                host = f"[{host}]"
-            if parsed.port is not None:
-                host = f"{host}:{parsed.port}"
-            return urllib.parse.urlunparse(parsed._replace(netloc=host, query="", fragment=""))
-        except Exception:
-            return "<redacted git URL>"
-
-    return _DIAGNOSTIC_URL_RE.sub(_redact, value)
+    return redact_git_diagnostic(value)

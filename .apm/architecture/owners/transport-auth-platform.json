@@ -9,7 +9,10 @@
         "src/apm_cli/core/auth.py",
         "src/apm_cli/core/host_providers.py"
       ],
-      "guards": ["transport-platform-host-credential-resolution"]
+      "guards": [
+        "transport-platform-ado-validation-bearer-fallback",
+        "transport-platform-host-credential-resolution"
+      ]
     },
     {
       "id": "url-path-containment-decoding",
@@ -42,11 +45,15 @@
         "transport-platform-git-clone-hooks-disabled",
         "transport-platform-git-clone-templates-disabled",
         "transport-platform-git-diagnostic-redaction",
+        "transport-platform-git-diagnostic-sanitizer-ownership",
+        "transport-platform-git-diagnostic-token-shapes",
         "transport-platform-git-single-remote-fetch",
         "transport-platform-git-url-credentials-out-of-argv",
         "transport-platform-git-url-header-specificity",
+        "transport-platform-git-url-header-specificity-fence",
         "transport-platform-git-url-rewrite-enforcement",
         "transport-platform-git-url-rewrite-once",
+        "transport-platform-git-url-rewrite-recovery",
         "transport-platform-git-url-rewrite-routing",
         "transport-platform-git-url-rewrite-safety"
       ]

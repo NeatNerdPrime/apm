@@ -338,6 +338,7 @@ def test_fetch_git_wraps_url_rewrite_rejection(
 
     message = str(raised.value)
     assert expected in message
+    assert "git config --show-origin --get-regexp" in message
     assert "apm marketplace update acme" in message
 
 
@@ -366,6 +367,7 @@ def test_fetch_git_preserves_cache_stage_rewrite_recovery(
 
     message = str(raised.value)
     assert "rewrites it to insecure HTTP" in message
+    assert "git config --show-origin --get-regexp" in message
     assert "Correct the matching Git configuration" in message
     assert "verify the remote" not in message
 

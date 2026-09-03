@@ -1405,6 +1405,9 @@ class AuthResolver:
         base_env = self.hardened_git_base_env()
         if policy.use_resolved_credentials:
             env = self.git_env_for_context(ctx, base_env=base_env)
+            if not ctx.token:
+                self._append_git_config(env, "credential.helper", "")
+                self._append_git_config(env, "http.extraheader", "")
         else:
             env = self.build_noninteractive_git_env(
                 base_env=base_env,
@@ -1419,12 +1422,33 @@ class AuthResolver:
             for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"):
                 if name in caller_env:
                     env[name] = caller_env[name]
+        if not policy.use_resolved_credentials and not policy.suppress_credential_helpers:
+            self._append_git_config(env, "http.extraheader", "")
         self._clear_platform_token_env(env, remove=True)
         if policy.reject_https_downgrade:
             from ..utils.git_env import validate_git_url_rewrite_safety
 
             validate_git_url_rewrite_safety(remote_url, env)
         return env
+
+    def build_ado_bearer_git_env(
+        self,
+        ctx: AuthContext,
+        bearer_token: str,
+        remote_url: str,
+    ) -> dict[str, str]:
+        """Build the managed Git environment for an ADO bearer retry."""
+        if ctx.host_info.kind != "ado":
+            raise ValueError("ADO bearer environments require an ADO auth context")
+        bearer_ctx = AuthContext(
+            token=bearer_token,
+            source=GitHubTokenManager.ADO_BEARER_SOURCE,
+            token_type=self.detect_token_type(bearer_token),
+            host_info=ctx.host_info,
+            git_env={},
+            auth_scheme="bearer",
+        )
+        return self.git_env_for_remote(bearer_ctx, remote_url)
 
     def build_native_git_credential_env(
         self,

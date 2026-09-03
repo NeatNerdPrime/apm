@@ -898,13 +898,13 @@ class TestHelperFunctions:
         with patch("os.walk", side_effect=_raise):
             assert _dir_size(root) == 0
 
-    def test_sanitize_url_strips_userinfo_and_preserves_port(self) -> None:
+    def test_sanitize_url_redacts_userinfo_and_preserves_port(self) -> None:
         sanitized = _sanitize_url("https://alice:secret@example.com:8443/repo.git")
-        assert sanitized == "https://example.com:8443/repo.git"
+        assert sanitized == "https://***@example.com:8443/repo.git"
 
-    def test_sanitize_url_strips_username_only_url(self) -> None:
+    def test_sanitize_url_redacts_username_only_url(self) -> None:
         url = "https://alice@example.com/repo.git"
-        assert _sanitize_url(url) == "https://example.com/repo.git"
+        assert _sanitize_url(url) == "https://***@example.com/repo.git"
 
     def test_sanitize_url_removes_query_fragment_and_embedded_credentials(self) -> None:
         diagnostic = (
@@ -915,8 +915,7 @@ class TestHelperFunctions:
 
         assert "SECRET123" not in sanitized
         assert "user:pass" not in sanitized
-        assert sanitized == "fatal: fetch https://example.com/repo.git failed"
+        assert sanitized == "fatal: fetch https://***@example.com/repo.git?access_token=*** failed"
 
     def test_sanitize_url_redacts_parser_errors(self) -> None:
-        with patch("urllib.parse.urlparse", side_effect=ValueError("bad url")):
-            assert _sanitize_url("https://example.com/repo.git") == "<redacted git URL>"
+        assert _sanitize_url("https://example.com:bad/repo.git") == "<redacted-git-url>"

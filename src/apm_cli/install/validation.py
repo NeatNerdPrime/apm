@@ -33,6 +33,7 @@ import requests
 
 from ..deps.github_rate_limit import GitHubThrottleError, raise_for_github_throttle
 from ..utils.console import _rich_echo, _rich_info, _rich_warning
+from ..utils.git_env import redact_git_diagnostic
 from ..utils.github_host import (
     default_host,
     is_ado_auth_failure_signal,
@@ -418,12 +419,10 @@ def _validate_ado_git_package(
 
     # Resolve managed-host authentication up front so git ls-remote receives a
     # noninteractive Authorization header without putting credentials in argv.
-    _resolved_token = None
     _dep_ctx = None
     _auth_scheme = "basic"
     if not is_generic:
         _dep_ctx = auth_resolver.resolve_for_dep(dep_ref)
-        _resolved_token = _dep_ctx.token
         _auth_scheme = getattr(_dep_ctx, "auth_scheme", "basic") or "basic"
 
     ado_downloader = GitHubPackageDownloader(auth_resolver=auth_resolver)
@@ -538,90 +537,65 @@ def _validate_ado_git_package(
             verbose_log(f"git ls-remote ({scheme}) rc=0 for {package}")
             return
         raw_stderr = (run_result.stderr or "").strip()[:200]
-        stderr_snippet = ado_downloader._sanitize_git_error(raw_stderr)
+        stderr_snippet = redact_git_diagnostic(raw_stderr)
         for env_var in ("GIT_ASKPASS", "GIT_CONFIG_GLOBAL"):
             env_val = validate_env.get(env_var, "")
             if env_val:
                 stderr_snippet = stderr_snippet.replace(env_val, "***")
         verbose_log(f"git ls-remote ({scheme}) rc={run_result.returncode}: {stderr_snippet}")
 
-    result = None
-    for probe_url in urls_to_try:
-        from ..utils.git_env import git_remote_refs
-
-        result = git_remote_refs(
-            probe_url,
-            timeout=30,
-            env=validate_env,
-            options=("--heads", "--exit-code"),
-        )
-        _log_attempt_result(probe_url, result)
-        if result.returncode == 0:
-            break
-
-    # ADO bearer fallback: if PAT was rejected (rc != 0 with auth-failure
-    # signal) AND the dep is on Azure DevOps AND we resolved a PAT,
-    # silently retry with az-cli bearer token.
-    if (
-        result is not None
-        and result.returncode != 0
-        and dep_ref.is_azure_devops()
-        and auth_resolver._supports_ado_bearer(dep_ref.host or "")
-        and _resolved_token is not None  # we had a PAT
-        and is_ado_auth_failure_signal(result.stderr or "")
+    def _probe_urls(
+        probe_env: dict[str, str],
     ):
-        try:
-            from apm_cli.core.azure_cli import AzureCliBearerError, get_bearer_provider
+        run_result = None
+        for probe_url in urls_to_try:
+            from ..utils.git_env import git_remote_refs
 
-            provider = get_bearer_provider()
-            if provider.is_available():
-                try:
-                    bearer = provider.get_bearer_token()
-                    bearer_url = ado_downloader._build_repo_url(
-                        dep_ref.repo_url,
-                        use_ssh=False,
-                        dep_ref=dep_ref,
-                        token=None,
-                        auth_scheme="bearer",
-                    )
-                    # SECURITY: build a CLEAN env via _build_git_env(scheme="bearer")
-                    # rather than {**validate_env, **build_ado_bearer_git_env(bearer)}.
-                    # validate_env still carries the PAT-context GIT_CONFIG_*
-                    # entries from _ctx_git_env; merging the bearer env on top
-                    # would keep the rejected PAT visible in the child-process
-                    # env (visible in /proc/<pid>/environ on Linux). _build_git_env
-                    # explicitly skips GIT_TOKEN for scheme="bearer" and emits
-                    # only the bearer-specific GIT_CONFIG_* injection.
-                    bearer_env = auth_resolver._build_git_env(
-                        bearer,
-                        scheme="bearer",
-                        host_kind="ado",
-                        base_env=ado_downloader.git_env,
-                    )
-                    bearer_result = git_remote_refs(
-                        bearer_url,
-                        timeout=30,
-                        env=bearer_env,
-                        options=("--heads", "--exit-code"),
-                    )
-                    if bearer_result.returncode == 0:
-                        # Emit deferred stale-PAT warning via resolver
-                        auth_resolver.emit_stale_pat_diagnostic(dep_ref.host or "dev.azure.com")
-                        if verbose_log:
-                            verbose_log(
-                                f"git ls-remote rc=0 for {package} (via AAD bearer fallback)"
-                            )
-                        return True
-                except AzureCliBearerError:
-                    pass
-        except ImportError:
-            pass
+            run_result = git_remote_refs(
+                probe_url,
+                timeout=30,
+                env=probe_env,
+                options=("--heads", "--exit-code"),
+            )
+            _log_attempt_result(probe_url, run_result)
+            if run_result.returncode == 0:
+                break
+        return run_result
+
+    bearer_attempted = False
+    if dep_ref.is_azure_devops() and _dep_ctx is not None:
+        fallback = auth_resolver.execute_with_bearer_fallback(
+            dep_ref,
+            lambda: _probe_urls(validate_env),
+            lambda bearer: _probe_urls(
+                auth_resolver.build_ado_bearer_git_env(
+                    _dep_ctx,
+                    bearer,
+                    package_url,
+                )
+            ),
+            lambda run_result: bool(
+                getattr(_dep_ctx, "source", "") == "ADO_APM_PAT"
+                and run_result is not None
+                and run_result.returncode != 0
+                and is_ado_auth_failure_signal(run_result.stderr or "")
+            ),
+        )
+        result = fallback.outcome
+        bearer_attempted = fallback.bearer_attempted
+    else:
+        result = _probe_urls(validate_env)
+
+    if result is None:
+        return False
+
+    # ADO PAT-to-bearer fallback is owned by AuthResolver. ADO validation
+    # never constructs or invokes a native Git credential-helper attempt.
 
     # Per-attempt verbose logging is emitted inside the probe loop
     # (and by the bearer-fallback branch above), so the result is
-    # already on screen by the time we get here. Stderr is sanitized
-    # via ``GitHubPackageDownloader._sanitize_git_error`` to scrub
-    # any token-bearing URLs / env values before logging.
+    # already on screen by the time we get here. Git diagnostics are
+    # redacted by the canonical helper before verbose rendering.
 
     # #1015: distinguish auth failures from non-auth failures (DNS,
     # timeout, repo-truly-not-found 404). Auth failures get a typed
@@ -640,6 +614,7 @@ def _validate_ado_git_package(
                 "validate",
                 org=_org,
                 dep_url=dep_ref.repo_url,
+                bearer_also_failed=bearer_attempted,
             )
             raise AuthenticationError(
                 f"Authentication failed for {_host}",

@@ -490,9 +490,9 @@ def fetch_sha_into_bare(
                 _pin_sha_as_head_ref()
                 return True
         except subprocess.CalledProcessError as exc:
-            stderr_text = ""
-            if exc.stderr:
-                stderr_text = exc.stderr.decode(errors="replace").strip()
+            from ..utils.git_env import git_subprocess_error_text
+
+            stderr_text = git_subprocess_error_text(exc)
             _log.debug(
                 "fetch_sha_into_bare: shallow fetch of %s failed: %s",
                 sha[:12],
@@ -534,9 +534,9 @@ def fetch_sha_into_bare(
             _pin_sha_as_head_ref()
             return True
     except subprocess.CalledProcessError as exc:
-        stderr_text = ""
-        if exc.stderr:
-            stderr_text = exc.stderr.decode(errors="replace").strip()
+        from ..utils.git_env import git_subprocess_error_text
+
+        stderr_text = git_subprocess_error_text(exc)
         _log.debug(
             "fetch_sha_into_bare: broad fetch failed for %s in %s: %s",
             sha[:12],
@@ -851,7 +851,6 @@ def build_clone_failure_message(
     default_host_fn: Callable[[], str],
     last_error: Exception | None,
     last_attempt_scheme: str | None,
-    sanitize_git_error: Callable[[str], str],
     public_github_non_auth_failure: bool = False,
 ) -> str:
     """Build the aggregate ``RuntimeError`` message for a failed transport plan.
@@ -945,12 +944,6 @@ def build_clone_failure_message(
     if last_error:
         from ..utils.git_env import git_subprocess_error_text
 
-        detail = (
-            str(last_error)
-            if (last_attempt_scheme or "").lower() == "ssh"
-            else git_subprocess_error_text(last_error)
-        )
-        sanitized_error = sanitize_git_error(detail)
-        error_msg += f" Last error: {sanitized_error}"
+        error_msg += f" Last error: {git_subprocess_error_text(last_error)}"
 
     return error_msg

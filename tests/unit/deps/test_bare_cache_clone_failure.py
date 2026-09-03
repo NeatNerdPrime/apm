@@ -68,7 +68,6 @@ def _clone_failure_message(
         default_host_fn=lambda: "github.com",
         last_error=last_error,
         last_attempt_scheme=attempt_scheme,
-        sanitize_git_error=lambda value: value,
     )
 
 
@@ -156,8 +155,8 @@ def test_clone_failure_message_explains_batchmode_no_more_auth_methods() -> None
     assert "ssh-add <key-file>" in message
 
 
-def test_clone_failure_message_does_not_echo_captured_ssh_stderr() -> None:
-    """Classification input must not become user-visible output."""
+def test_clone_failure_message_redacts_key_path_and_keeps_ssh_cause() -> None:
+    """SSH failures keep an actionable cause without exposing a key path."""
     message = _clone_failure_message(
         stderr=(
             b"Enter passphrase for key '/Users/alice/.ssh/id_secret':\n"
@@ -168,7 +167,7 @@ def test_clone_failure_message_does_not_echo_captured_ssh_stderr() -> None:
 
     assert "SSH key authentication failed" in message
     assert "/Users/alice/.ssh/id_secret" not in message
-    assert "Permission denied (publickey)" not in message
+    assert "Permission denied (publickey)" in message
 
 
 def test_clone_failure_message_omits_ssh_diagnostic_for_https_token_failure() -> None:
@@ -202,6 +201,7 @@ def test_clone_failure_message_omits_ssh_diagnostic_for_host_key_failure() -> No
 
     assert "SSH key authentication failed" not in message
     assert "ssh-add <key-file>" not in message
+    assert "Host key verification failed." in message
 
 
 def test_clone_failure_message_omits_ssh_diagnostic_for_network_failure() -> None:
@@ -213,6 +213,7 @@ def test_clone_failure_message_omits_ssh_diagnostic_for_network_failure() -> Non
 
     assert "SSH key authentication failed" not in message
     assert "ssh-add <key-file>" not in message
+    assert "Could not resolve hostname" in message
 
 
 def test_clone_engine_threads_failed_ssh_scheme_into_diagnostic(tmp_path: Path) -> None:

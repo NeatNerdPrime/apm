@@ -28,7 +28,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from apm_cli.utils.subprocess_env import external_process_env
 
@@ -86,7 +86,46 @@ _GIT_CHILD_TOKEN_ENV_PREFIXES = (
     "GITHUB_APM_PAT_",
 )
 _AUTH_HEADER_RE = re.compile(r"(?im)(authorization:\s*)[^\r\n]+")
+_DIAGNOSTIC_GIT_URL_RE = re.compile(r"(?i)\b(?:https?|ssh|git)://[^\s'\"<>]+")
 _URL_USERINFO_RE = re.compile(r"(https?://)[^/@\s]+@")
+_URL_SECRET_QUERY_RE = re.compile(
+    r"(?i)([?&](?:access_token|auth|key|password|secret|token)=)[^&#\s]+"
+)
+_SECRET_ENV_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b("
+    r"ADO_APM_PAT|GH_TOKEN|GITHUB_APM_PAT(?:_[A-Z0-9_]+)?|GITHUB_TOKEN|"
+    r"GITLAB_APM_PAT|GITLAB_TOKEN"
+    r")=[^\s]+"
+)
+_BARE_PLATFORM_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"github_pat_[A-Za-z0-9_]{20,}|"
+    r"gh[oprsu]_[A-Za-z0-9_]{6,}|"
+    r"glpat[-_][A-Za-z0-9_-]{6,}|"
+    r"[A-Za-z0-9]{75}AZDO[A-Za-z0-9]{5}|"
+    r"[A-Za-z0-9]{52}"
+    r")(?![A-Za-z0-9_])"
+)
+_LABELLED_SECRET_RE = re.compile(
+    r"(?i)\b(token|password|secret|credential)"
+    r"(\s*(?:[:=]\s*|\s+))"
+    r"([A-Za-z0-9_.~+/-]{4,})"
+)
+_SSH_KEY_PATH_RE = re.compile(
+    r"(?i)((?:enter passphrase for key|identity file)\s+)(['\"]?)[^'\"\r\n]+(['\"]?)"
+)
+_SENSITIVE_HTTP_HEADER_PARTS = frozenset(
+    {
+        "auth",
+        "authorization",
+        "cookie",
+        "credential",
+        "key",
+        "password",
+        "secret",
+        "token",
+    }
+)
 _REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 _SCP_HOST_RE = re.compile(r"^(?:[^/@:\s]+@)?(\[[^\]]+\]|[^/:@\s]+):")
 
@@ -103,6 +142,7 @@ class GitUrlRewriteError(ValueError):
     def __init__(self, reason: str, message: str) -> None:
         """Initialize one rejection with a machine-readable reason."""
         self.reason = reason
+        self.recovery_hint = _URL_REWRITE_RECOVERY
         super().__init__(f"{message}; {_URL_REWRITE_RECOVERY}")
 
 
@@ -201,9 +241,66 @@ def git_subprocess_env(overrides: dict[str, object] | None = None) -> dict[str, 
 
 
 def redact_git_diagnostic(text: str) -> str:
-    """Redact URL userinfo and Authorization values from Git diagnostics."""
-    without_userinfo = _URL_USERINFO_RE.sub(r"\1***@", text)
-    return _AUTH_HEADER_RE.sub(r"\1******", without_userinfo)
+    """Redact credentials and private key paths from Git diagnostics."""
+    without_url_secrets = _DIAGNOSTIC_GIT_URL_RE.sub(_redact_git_diagnostic_url, text)
+    without_userinfo = _URL_USERINFO_RE.sub(r"\1***@", without_url_secrets)
+    without_query_secrets = _URL_SECRET_QUERY_RE.sub(r"\1***", without_userinfo)
+    without_headers = _AUTH_HEADER_RE.sub(r"\1******", without_query_secrets)
+    without_env = _SECRET_ENV_ASSIGNMENT_RE.sub(r"\1=***", without_headers)
+    without_tokens = _BARE_PLATFORM_TOKEN_RE.sub("***", without_env)
+    without_labelled = _LABELLED_SECRET_RE.sub(r"\1\2***", without_tokens)
+    return _SSH_KEY_PATH_RE.sub(r"\1'[REDACTED]'", without_labelled)
+
+
+def _redact_git_diagnostic_url(match: re.Match[str]) -> str:
+    """Remove userinfo/fragment data and redact query values in one URL."""
+    try:
+        parsed = urlsplit(match.group(0))
+        host = parsed.hostname or ""
+        if ":" in host:
+            host = f"[{host}]"
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        if parsed.username is not None or parsed.password is not None:
+            host = f"***@{host}"
+        query = re.sub(r"(^|&)([^=&]+)=[^&]*", r"\1\2=***", parsed.query)
+        if parsed.query and query == parsed.query and "=" not in parsed.query:
+            query = "***"
+        return urlunsplit((parsed.scheme, host, parsed.path, query, ""))
+    except ValueError:
+        return "<redacted-git-url>"
+
+
+def _is_credential_bearing_http_header(value: str) -> bool:
+    """Return whether one http.extraHeader value can carry a credential."""
+    stripped = value.strip()
+    if not stripped:
+        return False
+    name, separator, _header_value = stripped.partition(":")
+    if not separator:
+        return True
+    if _BARE_PLATFORM_TOKEN_RE.search(_header_value):
+        return True
+    if re.match(r"(?i)^\s*(?:basic|bearer|token)\s+\S+", _header_value):
+        return True
+    parts = frozenset(part for part in re.split(r"[^a-z0-9]+", name.lower()) if part)
+    return bool(parts & _SENSITIVE_HTTP_HEADER_PARTS)
+
+
+def _is_http_extraheader_key(key: str) -> bool:
+    """Return whether *key* is an unscoped or URL-scoped extraHeader."""
+    normalized = key.lower()
+    return normalized == "http.extraheader" or (
+        normalized.startswith("http.") and normalized.endswith(".extraheader")
+    )
+
+
+def _is_credential_helper_key(key: str) -> bool:
+    """Return whether *key* configures a native Git credential helper."""
+    normalized = key.lower()
+    return normalized == "credential.helper" or (
+        normalized.startswith("credential.") and normalized.endswith(".helper")
+    )
 
 
 def git_subprocess_error_text(exc: BaseException) -> str:
@@ -231,7 +328,11 @@ def clear_git_platform_token_env(
                 env[key] = ""
 
 
-def clear_git_auth_env(env: dict[str, str]) -> None:
+def clear_git_auth_env(
+    env: dict[str, str],
+    *,
+    remove_helpers: bool = False,
+) -> None:
     """Remove inherited Git authorization channels while retaining other config."""
     env.pop("GIT_TOKEN", None)
     env.pop("GIT_HTTP_EXTRAHEADER", None)
@@ -244,7 +345,12 @@ def clear_git_auth_env(env: dict[str, str]) -> None:
     for index in range(max(0, count)):
         key = env.pop(f"GIT_CONFIG_KEY_{index}", "")
         value = env.pop(f"GIT_CONFIG_VALUE_{index}", "")
-        if "extraheader" in key.lower() or value.strip().lower().startswith("authorization:"):
+        if (
+            _is_http_extraheader_key(key)
+            and (not value.strip() or _is_credential_bearing_http_header(value))
+        ) or value.strip().lower().startswith("authorization:"):
+            continue
+        if remove_helpers and _is_credential_helper_key(key):
             continue
         if key:
             retained.append((key, value))
@@ -291,6 +397,17 @@ class _GitConfigSnapshot:
     entries: tuple[GitConfigEntry, ...]
     rewrites: tuple[tuple[str, str], ...]
     http_headers: tuple[GitConfigEntry, ...]
+
+
+@dataclass(frozen=True)
+class _GitAuthFence:
+    """Auth config selected by APM for one effective HTTP remote."""
+
+    remote_url: str
+    reset_headers: bool
+    suppress_helpers: bool
+    safe_headers: tuple[str, ...]
+    managed_header: str | None
 
 
 def _read_effective_git_config(
@@ -379,11 +496,26 @@ def _has_applicable_http_authorization(
     env: dict[str, str],
 ) -> bool:
     """Ask Git which URL-scoped extra headers apply to one remote."""
-    if env.get("GIT_HTTP_EXTRAHEADER", "").strip():
+    if _is_credential_bearing_http_header(env.get("GIT_HTTP_EXTRAHEADER", "")):
         return True
-    if not headers:
-        return False
+    selected = _urlmatched_header_group(remote_url, headers, env)
+    active: list[str] = []
+    for entry in selected:
+        if entry.value.strip():
+            active.append(entry.value)
+        else:
+            active.clear()
+    return any(_is_credential_bearing_http_header(value) for value in active)
 
+
+def _urlmatched_header_group(
+    remote_url: str,
+    headers: Sequence[GitConfigEntry],
+    env: dict[str, str],
+) -> tuple[GitConfigEntry, ...]:
+    """Return the exact extraHeader key group selected by Git for one URL."""
+    if not headers:
+        return ()
     probe_env = git_subprocess_env(env)
     probe_env.pop("GIT_CONFIG_PARAMETERS", None)
     probe_env.pop("GIT_CONFIG_COUNT", None)
@@ -396,7 +528,7 @@ def _has_applicable_http_authorization(
     probe_env["GIT_CONFIG_COUNT"] = str(len(headers))
     for index, entry in enumerate(headers):
         probe_env[f"GIT_CONFIG_KEY_{index}"] = entry.key
-        probe_env[f"GIT_CONFIG_VALUE_{index}"] = entry.value
+        probe_env[f"GIT_CONFIG_VALUE_{index}"] = f"X-Apm-Config-Probe: {index}"
 
     git_executable = get_git_executable()
     try:
@@ -420,10 +552,21 @@ def _has_applicable_http_authorization(
     except OSError as exc:
         raise GitUrlRewriteProbeError("Git URL-match probe could not start") from exc
     if result.returncode == 1:
-        return False
+        return ()
     if result.returncode != 0 or not isinstance(result.stdout, bytes):
         raise GitUrlRewriteProbeError("Git URL-match probe failed")
-    return any(value.strip() for value in result.stdout.split(b"\0"))
+    selected = result.stdout.rstrip(b"\0\n")
+    prefix = b"X-Apm-Config-Probe: "
+    if not selected.startswith(prefix):
+        raise GitUrlRewriteProbeError("Git URL-match probe returned malformed output")
+    try:
+        selected_index = int(selected.removeprefix(prefix))
+    except ValueError as exc:
+        raise GitUrlRewriteProbeError("Git URL-match probe returned malformed output") from exc
+    if selected_index < 0 or selected_index >= len(headers):
+        raise GitUrlRewriteProbeError("Git URL-match probe returned malformed output")
+    selected_key = headers[selected_index].key.lower()
+    return tuple(entry for entry in headers if entry.key.lower() == selected_key)
 
 
 def git_url_has_authorization(
@@ -642,14 +785,20 @@ def set_git_authorization_header(
     """Replace Git auth channels with one process-scoped Authorization header."""
     if "\r" in scheme or "\n" in scheme or "\r" in credential or "\n" in credential:
         raise ValueError("scheme and credential must not contain CR or LF")
-    clear_git_auth_env(env)
+    clear_git_auth_env(env, remove_helpers=True)
+    _append_git_config_entry(env, "credential.helper", "")
+    _append_git_config_entry(env, "http.extraheader", f"Authorization: {scheme} {credential}")
+
+
+def _append_git_config_entry(env: dict[str, str], key: str, value: str) -> None:
+    """Append one process-scoped Git config entry."""
     try:
         count = max(0, int(env.get("GIT_CONFIG_COUNT", "0") or "0"))
     except ValueError:
         count = 0
     env["GIT_CONFIG_COUNT"] = str(count + 1)
-    env[f"GIT_CONFIG_KEY_{count}"] = "http.extraheader"
-    env[f"GIT_CONFIG_VALUE_{count}"] = f"Authorization: {scheme} {credential}"
+    env[f"GIT_CONFIG_KEY_{count}"] = key
+    env[f"GIT_CONFIG_VALUE_{count}"] = value
 
 
 def _append_parent_git_config(
@@ -657,7 +806,7 @@ def _append_parent_git_config(
     *,
     git_dir: Path | None = None,
     worktree: Path | None = None,
-) -> None:
+) -> _GitConfigSnapshot:
     """Retain parent URL rewrites without restoring config auth channels."""
     try:
         parent_snapshot = _read_effective_git_config(
@@ -670,6 +819,27 @@ def _append_parent_git_config(
     except ValueError as exc:
         raise GitUrlRewriteProbeError("Git config could not be interpreted") from exc
     _append_git_url_rewrites(env, parent_snapshot.rewrites)
+    return parent_snapshot
+
+
+def _merge_parent_git_config_snapshot(
+    parent: _GitConfigSnapshot,
+    child: _GitConfigSnapshot,
+) -> _GitConfigSnapshot:
+    """Add flattened parent config while preserving child command precedence."""
+    child_entries = {(entry.scope, entry.key, entry.value) for entry in child.entries}
+    parent_entries = tuple(
+        entry
+        for entry in parent.entries
+        if not (entry.key.lower().startswith("url.") and entry.key.lower().endswith(".insteadof"))
+        and (entry.scope, entry.key, entry.value) not in child_entries
+    )
+    entries = (*parent_entries, *child.entries)
+    return _GitConfigSnapshot(
+        entries=entries,
+        rewrites=child.rewrites,
+        http_headers=tuple(entry for entry in entries if _is_http_extraheader_key(entry.key)),
+    )
 
 
 def _materialize_git_config_snapshot(
@@ -677,6 +847,7 @@ def _materialize_git_config_snapshot(
     snapshot: _GitConfigSnapshot,
     *,
     retain_auth: bool,
+    auth_fence: _GitAuthFence | None,
 ) -> None:
     """Freeze non-local Git config into process entries for execution."""
     env.pop("GIT_CONFIG_PARAMETERS", None)
@@ -685,6 +856,11 @@ def _materialize_git_config_snapshot(
         if key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
             env.pop(key, None)
 
+    header_key = (
+        f"http.{_http_config_scope(auth_fence.remote_url)}.extraheader"
+        if auth_fence is not None
+        else None
+    )
     retained: list[tuple[str, str]] = []
     for entry in snapshot.entries:
         normalized = entry.key.lower()
@@ -694,12 +870,31 @@ def _materialize_git_config_snapshot(
             normalized.startswith("includeif.") and normalized.endswith(".path")
         ):
             continue
-        if not retain_auth and (
-            "extraheader" in normalized or entry.value.strip().lower().startswith("authorization:")
-        ):
+        if not retain_auth and _is_http_extraheader_key(normalized):
             continue
+        if auth_fence is not None:
+            if header_key is not None and normalized == header_key.lower():
+                continue
+            if _is_http_extraheader_key(normalized) and (
+                not entry.value.strip() or _is_credential_bearing_http_header(entry.value)
+            ):
+                continue
+            if auth_fence.suppress_helpers and _is_credential_helper_key(normalized):
+                continue
         retained.append((entry.key, entry.value))
 
+    if auth_fence is not None:
+        if auth_fence.suppress_helpers:
+            retained.append(("credential.helper", ""))
+        if header_key is None:
+            raise GitUrlRewriteProbeError("Git auth fence lost its HTTP(S) scope")
+        if auth_fence.reset_headers:
+            retained.append((header_key, ""))
+        retained.extend((header_key, value) for value in auth_fence.safe_headers)
+        if auth_fence.managed_header is not None:
+            retained.append((header_key, auth_fence.managed_header))
+
+    retained = list(dict.fromkeys(retained))
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_CONFIG_SYSTEM"] = os.devnull
     env["GIT_CONFIG_GLOBAL"] = os.devnull
@@ -708,6 +903,71 @@ def _materialize_git_config_snapshot(
         for index, (key, value) in enumerate(retained):
             env[f"GIT_CONFIG_KEY_{index}"] = key
             env[f"GIT_CONFIG_VALUE_{index}"] = value
+
+
+def _http_config_scope(remote_url: str) -> str:
+    """Return a credential-free URL scope accepted by Git's http config."""
+    parsed = urlsplit(remote_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise GitUrlRewriteProbeError("Git auth fence requires an HTTP(S) URL")
+    host = parsed.hostname
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = host
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "/", "", ""))
+
+
+def _active_header_values(entries: Sequence[GitConfigEntry]) -> tuple[str, ...]:
+    """Apply Git's empty-value reset semantics to one selected header group."""
+    active: list[str] = []
+    for entry in entries:
+        if entry.value.strip():
+            active.append(entry.value)
+        else:
+            active.clear()
+    return tuple(active)
+
+
+def _build_git_auth_fence(
+    transport_url: str,
+    snapshot: _GitConfigSnapshot,
+    env: dict[str, str],
+    *,
+    intent_snapshot: _GitConfigSnapshot | None = None,
+) -> _GitAuthFence | None:
+    """Build the anonymous/native/managed header snapshot for one HTTP URL."""
+    if urlsplit(transport_url).scheme.lower() not in {"http", "https"}:
+        return None
+    intent = intent_snapshot or snapshot
+    command_headers = tuple(entry for entry in intent.http_headers if entry.scope == "command")
+    command_group = _urlmatched_header_group(transport_url, command_headers, env)
+    command_values = _active_header_values(command_group)
+    managed = tuple(value for value in command_values if _is_credential_bearing_http_header(value))
+    reset_headers = any(not entry.value.strip() for entry in command_group)
+    helper_reset = any(
+        entry.scope == "command"
+        and _is_credential_helper_key(entry.key)
+        and not entry.value.strip()
+        for entry in intent.entries
+    )
+    if not managed and not reset_headers:
+        return None
+
+    selected_group = _urlmatched_header_group(transport_url, snapshot.http_headers, env)
+    safe_headers = tuple(
+        value
+        for value in _active_header_values(selected_group)
+        if not _is_credential_bearing_http_header(value)
+    )
+    return _GitAuthFence(
+        remote_url=transport_url,
+        reset_headers=True,
+        suppress_helpers=helper_reset or bool(managed),
+        safe_headers=safe_headers,
+        managed_header=managed[-1] if managed else None,
+    )
 
 
 def _is_scope_sensitive_network_config(entry: GitConfigEntry) -> bool:
@@ -735,8 +995,9 @@ def git_network_env(
 ) -> dict[str, str]:
     """Return the canonical validated environment for one network Git URL."""
     env = git_subprocess_env(overrides)
+    parent_snapshot: _GitConfigSnapshot | None = None
     if overrides is not None:
-        _append_parent_git_config(env, git_dir=git_dir, worktree=worktree)
+        parent_snapshot = _append_parent_git_config(env, git_dir=git_dir, worktree=worktree)
     effective_url, snapshot = _validated_git_url_rewrite_policy(
         remote_url,
         env,
@@ -750,7 +1011,25 @@ def git_network_env(
         retain_auth = False
     else:
         retain_auth = True
-    _materialize_git_config_snapshot(env, snapshot, retain_auth=retain_auth)
+    intent_snapshot = snapshot
+    if parent_snapshot is not None:
+        snapshot = _merge_parent_git_config_snapshot(parent_snapshot, snapshot)
+    auth_fence = (
+        _build_git_auth_fence(
+            transport_url,
+            snapshot,
+            env,
+            intent_snapshot=intent_snapshot,
+        )
+        if retain_auth
+        else None
+    )
+    _materialize_git_config_snapshot(
+        env,
+        snapshot,
+        retain_auth=retain_auth,
+        auth_fence=auth_fence,
+    )
     if _has_scope_sensitive_network_config(snapshot):
         materialized_url, _materialized_snapshot = _validated_git_url_rewrite_policy(
             remote_url,

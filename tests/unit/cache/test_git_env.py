@@ -201,6 +201,44 @@ class TestGitSubprocessEnv:
         assert "Authorization: ******" in message
         assert "secret-value" not in message
 
+    @pytest.mark.parametrize(
+        "secret",
+        (
+            "github_pat_" + "A" * 30,
+            "ghp_" + "B" * 36,
+            "glpat-" + "C" * 24,
+            "D" * 75 + "AZDO" + "E" * 5,
+            "F" * 52,
+        ),
+        ids=("github-fine-grained", "github-classic", "gitlab", "ado-new", "ado-legacy"),
+    )
+    def test_subprocess_error_text_redacts_bare_platform_tokens(self, secret: str) -> None:
+        exc = subprocess.CalledProcessError(
+            128,
+            ["git", "fetch"],
+            stderr=f"remote: rejected credential {secret}\nfatal: denied",
+        )
+
+        message = git_subprocess_error_text(exc)
+
+        assert secret not in message
+        assert "***" in message
+
+    def test_subprocess_error_text_redacts_private_key_path_but_keeps_ssh_cause(self) -> None:
+        exc = subprocess.CalledProcessError(
+            128,
+            ["git", "clone"],
+            stderr=(
+                "Enter passphrase for key '/Users/alice/.ssh/id_private':\n"
+                "Host key verification failed.\n"
+            ),
+        )
+
+        message = git_subprocess_error_text(exc)
+
+        assert "/Users/alice/.ssh/id_private" not in message
+        assert "Host key verification failed." in message
+
     def test_rewrite_probe_failure_has_safe_recovery(self) -> None:
         result = subprocess.CompletedProcess(
             ["git", "config"],

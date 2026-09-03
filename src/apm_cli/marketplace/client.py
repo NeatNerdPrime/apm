@@ -591,6 +591,8 @@ def _fetch_git(
             if isinstance(exc, GitUrlRewriteError)
             else str(exc)
         )
+        if isinstance(exc, GitUrlRewriteError):
+            reason = f"{reason}; {exc.recovery_hint}"
         return MarketplaceFetchError(
             source.name,
             reason,

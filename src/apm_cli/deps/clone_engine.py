@@ -483,7 +483,6 @@ class CloneEngine:
             default_host_fn=default_host,
             last_error=last_error,
             last_attempt_scheme=prev_scheme,
-            sanitize_git_error=host._sanitize_git_error,
             public_github_non_auth_failure=bool(
                 public_github_https_first
                 and last_error is not None

@@ -892,7 +892,12 @@ class TestRefResolverTokenInjection:
             for i in range(int(env["GIT_CONFIG_COUNT"]))
             if "Authorization" in (v := env[f"GIT_CONFIG_VALUE_{i}"])
         ]
-        assert headers == [("http.extraheader", f"Authorization: Basic {expected}")]
+        assert headers == [
+            (
+                "http.https://dev.azure.com/contoso/platform/_git/repo.extraheader",
+                f"Authorization: Basic {expected}",
+            )
+        ]
 
     def test_ado_ssh_transport_skips_bearer_retry(self) -> None:
         """SSH transport never retries an ADO PAT as an HTTP bearer flow."""
@@ -942,11 +947,13 @@ class TestGitUrlAndEnvPreservesRetainedGitConfig:
             git_env=self._retained(),
         )
         _url, env = resolver._git_url_and_env("contoso/platform/repo")
-        assert env["GIT_CONFIG_COUNT"] == "2"
+        assert env["GIT_CONFIG_COUNT"] == "3"
         assert env["GIT_CONFIG_KEY_0"] == "http.sslCAInfo"
         assert env["GIT_CONFIG_VALUE_0"] == "/corporate/ca.pem"
-        assert env["GIT_CONFIG_KEY_1"] == "http.extraheader"
-        assert env["GIT_CONFIG_VALUE_1"] == "Authorization: Bearer aad-jwt"
+        assert env["GIT_CONFIG_KEY_1"] == "credential.helper"
+        assert env["GIT_CONFIG_VALUE_1"] == ""
+        assert env["GIT_CONFIG_KEY_2"] == "http.extraheader"
+        assert env["GIT_CONFIG_VALUE_2"] == "Authorization: Bearer aad-jwt"
         resolver.close()
 
     def test_ado_basic_appends_after_retained_entries(self) -> None:
@@ -958,10 +965,12 @@ class TestGitUrlAndEnvPreservesRetainedGitConfig:
         )
         _url, env = resolver._git_url_and_env("contoso/platform/repo")
         expected = base64.b64encode(b":ado_pat").decode()
-        assert env["GIT_CONFIG_COUNT"] == "2"
+        assert env["GIT_CONFIG_COUNT"] == "3"
         assert env["GIT_CONFIG_KEY_0"] == "http.sslCAInfo"
-        assert env["GIT_CONFIG_KEY_1"] == "http.extraheader"
-        assert env["GIT_CONFIG_VALUE_1"] == f"Authorization: Basic {expected}"
+        assert env["GIT_CONFIG_KEY_1"] == "credential.helper"
+        assert env["GIT_CONFIG_VALUE_1"] == ""
+        assert env["GIT_CONFIG_KEY_2"] == "http.extraheader"
+        assert env["GIT_CONFIG_VALUE_2"] == f"Authorization: Basic {expected}"
         resolver.close()
 
     def test_ado_bearer_replaces_stale_header_instead_of_stacking(self) -> None:
@@ -985,6 +994,8 @@ class TestGitUrlAndEnvPreservesRetainedGitConfig:
             if k.startswith("GIT_CONFIG_VALUE_") and "Authorization" in str(v)
         ]
         assert headers == ["Authorization: Bearer fresh-jwt"]
-        assert env["GIT_CONFIG_COUNT"] == "2"
+        assert env["GIT_CONFIG_COUNT"] == "3"
         assert env["GIT_CONFIG_KEY_0"] == "http.sslCAInfo"
+        assert env["GIT_CONFIG_KEY_1"] == "credential.helper"
+        assert env["GIT_CONFIG_VALUE_1"] == ""
         resolver.close()

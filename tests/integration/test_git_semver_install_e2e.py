@@ -30,7 +30,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -551,6 +554,72 @@ class TestPositionalVirtualSubdirectorySemver:
         assert result.returncode != 0
         assert raw_reference in result.stdout
         assert _file_tree_bytes(project) == before
+
+
+def test_real_git_semver_environment_build_is_single_flight(
+    tmp_path: Path,
+) -> None:
+    """Concurrent fixture-backed semver resolution builds one shared Git env."""
+    from apm_cli.core.auth import AuthResolver
+    from apm_cli.deps.transport_selection import TransportSelector
+    from apm_cli.install.helpers.ref_reuse import maybe_resolve_git_semver
+
+    isolated = IsolatedApmEnvironment.create(tmp_path / "isolated", base_env=dict(os.environ))
+    environment = isolated.subprocess_env()
+    source = isolated.package_root / "mono"
+    source.mkdir(parents=True)
+    (source / "apm.yml").write_text(
+        "name: mono\nversion: 1.2.0\ndescription: fixture package\n",
+        encoding="ascii",
+    )
+    repositories = LocalGitRepositoryFactory(isolated.repository_root, env=environment)
+    repository = repositories.create("mono", source_tree=source)
+    commit = repositories.commit(repository, message="mono v1.2.0")
+    repositories.tag(repository, "v1.2.0", commit)
+    requested = "https://gitlab.com/acme/mono.git"
+    child_env = repositories.url_rewrite_subprocess_env(repository, requested)
+    child_env["GITLAB_APM_PAT"] = "glpat-" + "A" * 24
+
+    class _CountingAuthResolver(AuthResolver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.build_count = 0
+            self.count_lock = threading.Lock()
+
+        def git_env_for_remote(self, ctx, remote_url: str) -> dict[str, str]:
+            with self.count_lock:
+                self.build_count += 1
+            time.sleep(0.02)
+            return super().git_env_for_remote(ctx, remote_url)
+
+    resolver = _CountingAuthResolver()
+    shared_cache: dict = {}
+    shared_lock = threading.Lock()
+    workers = 8
+    barrier = threading.Barrier(workers)
+
+    def resolve_one(_index: int):
+        dep = DependencyReference.parse(f"{requested}#^1.0.0")
+        dep.source = "git"
+        barrier.wait(timeout=10)
+        return maybe_resolve_git_semver(
+            dep_ref=dep,
+            existing_lockfile=None,
+            update_refs=True,
+            auth_resolver=resolver,
+            ref_resolver_cache=shared_cache,
+            ref_resolver_cache_lock=shared_lock,
+            transport_selector=TransportSelector(),
+        )
+
+    with patch.dict(os.environ, child_env, clear=True):
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            resolutions = list(executor.map(resolve_one, range(workers)))
+
+    assert {resolution.resolved_tag for resolution in resolutions} == {"v1.2.0"}
+    assert {resolution.resolved_sha for resolution in resolutions} == {commit.sha}
+    assert resolver.build_count == 1
+    assert len(shared_cache) == 1
 
 
 # ---------------------------------------------------------------------------

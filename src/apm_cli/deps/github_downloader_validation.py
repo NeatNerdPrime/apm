@@ -47,6 +47,7 @@ from ..config import get_apm_temp_dir
 from ..utils.git_env import git_subprocess_error_text
 from ..utils.github_host import (
     default_host,
+    is_ado_auth_failure_signal,
     is_github_hostname,
 )
 from ..utils.path_security import (
@@ -370,6 +371,35 @@ def _build_validation_attempts(
         dep_auth_ctx = downloader._resolve_dep_auth_ctx(dep_ref)
         dep_auth_scheme = dep_auth_ctx.auth_scheme if dep_auth_ctx else "basic"
 
+    if is_ado:
+        ado_url = downloader._build_repo_url(
+            dep_ref.repo_url,
+            use_ssh=False,
+            dep_ref=dep_ref,
+            token="",
+            auth_scheme=dep_auth_scheme,
+        )
+        ado_env = (
+            downloader.auth_resolver.git_env_for_remote(dep_auth_ctx, ado_url)
+            if dep_auth_ctx is not None
+            else downloader.auth_resolver.build_noninteractive_git_env(
+                base_env=downloader.git_env,
+                host_kind="ado",
+                preserve_config_isolation=True,
+                suppress_credential_helpers=True,
+            )
+        )
+        auth_label = (
+            "ADO authenticated HTTPS (bearer header)"
+            if dep_auth_scheme == "bearer"
+            else (
+                "ADO authenticated HTTPS (basic header)"
+                if dep_token
+                else "ADO HTTPS without resolved credential"
+            )
+        )
+        return [AttemptSpec(auth_label, ado_url, ado_env)]
+
     attempts: list[AttemptSpec] = []
 
     # Attempt 1: explicit token, header-injected. Skipped when no token.
@@ -577,12 +607,85 @@ def _ref_exists_via_ls_remote(
         except (GitCommandError, OSError) as exc:
             log(
                 "  [x] ls-remote failed via anonymous-first GitHub HTTPS: "
-                f"{downloader._sanitize_git_error(str(exc))}"
+                f"{git_subprocess_error_text(exc)}"
             )
             return False, None
 
     attempts = _build_validation_attempts(downloader, dep_ref, log)
     if not attempts:
+        return False, None
+
+    if dep_ref.is_azure_devops():
+        primary_attempt = attempts[0]
+        primary_ctx = downloader._resolve_dep_auth_ctx(dep_ref)
+
+        def _probe_ado(
+            attempt: AttemptSpec,
+        ) -> tuple[str, AttemptSpec, BaseException | None]:
+            try:
+                output = (
+                    _run_remote(attempt.url, attempt.env)
+                    if is_sha
+                    else _run_remote(
+                        attempt.url,
+                        attempt.env,
+                        options=("--heads", "--tags"),
+                        patterns=(ref,),
+                    )
+                )
+                return output, attempt, None
+            except (GitCommandError, OSError) as exc:
+                return "", attempt, exc
+
+        def _bearer_probe(bearer: str) -> tuple[str, AttemptSpec, BaseException | None]:
+            if primary_ctx is None:
+                return "", primary_attempt, RuntimeError("ADO auth context unavailable")
+            bearer_env = downloader.auth_resolver.build_ado_bearer_git_env(
+                primary_ctx,
+                bearer,
+                primary_attempt.url,
+            )
+            bearer_attempt = AttemptSpec(
+                "ADO authenticated HTTPS (bearer header)",
+                primary_attempt.url,
+                bearer_env,
+            )
+            return _probe_ado(bearer_attempt)
+
+        fallback = downloader.auth_resolver.execute_with_bearer_fallback(
+            dep_ref,
+            lambda: _probe_ado(primary_attempt),
+            _bearer_probe,
+            lambda outcome: bool(
+                primary_ctx is not None
+                and getattr(primary_ctx, "source", "") == "ADO_APM_PAT"
+                and outcome[2] is not None
+                and is_ado_auth_failure_signal(git_subprocess_error_text(outcome[2]))
+            ),
+        )
+        output, winning_attempt, error = fallback.outcome
+        if error is not None:
+            log(
+                f"  [x] ls-remote failed via {winning_attempt.label}: "
+                f"{git_subprocess_error_text(error)}"
+            )
+            return False, None
+        matched = bool(
+            output
+            and (
+                any(
+                    line.split("\t", 1)[0].lower().startswith(ref_lc)
+                    for line in output.splitlines()
+                    if line
+                )
+                if is_sha
+                else output.strip()
+            )
+        )
+        if matched:
+            log(f"  [+] ls-remote ok via {winning_attempt.label}")
+            return True, winning_attempt
+        log(f"  [!] ls-remote returned no matching refs via {winning_attempt.label}")
         return False, None
 
     for attempt in attempts:
@@ -613,7 +716,7 @@ def _ref_exists_via_ls_remote(
                     return True, attempt
                 log(f"  [!] ls-remote returned no matching refs via {label}")
         except (GitCommandError, OSError) as exc:
-            log(f"  [x] ls-remote failed via {label}: {downloader._sanitize_git_error(str(exc))}")
+            log(f"  [x] ls-remote failed via {label}: {git_subprocess_error_text(exc)}")
 
     return False, None
 
@@ -695,10 +798,7 @@ def _path_exists_in_tree_at_ref(
                 env=remote_env,
             )
         except (subprocess.CalledProcessError, OSError) as exc:
-            log(
-                f"  [x] shallow fetch failed via {label}: "
-                f"{downloader._sanitize_git_error(git_subprocess_error_text(exc))}"
-            )
+            log(f"  [x] shallow fetch failed via {label}: {git_subprocess_error_text(exc)}")
             return False
 
         try:
@@ -711,7 +811,7 @@ def _path_exists_in_tree_at_ref(
             )
             output = result.stdout
         except (subprocess.CalledProcessError, OSError) as exc:
-            error = downloader._sanitize_git_error(git_subprocess_error_text(exc))
+            error = git_subprocess_error_text(exc)
             log(f"  [x] ls-tree failed via {label}: {error}")
             return False
 

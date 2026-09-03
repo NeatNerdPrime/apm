@@ -51,6 +51,7 @@ Behavior:
 """
 FAKE_GIT += """
 import os
+import subprocess
 import sys
 
 argv = sys.argv[1:]
@@ -66,8 +67,43 @@ if "config" in argv and "--list" in argv:
     os.write(1, fields)
     sys.exit(0)
 
+if "config" in argv and "--get-urlmatch" in argv:
+    target = argv[-1]
+    matches = []
+    count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    for index in range(count):
+        key = os.environ.get(f"GIT_CONFIG_KEY_{index}", "")
+        value = os.environ.get(f"GIT_CONFIG_VALUE_{index}", "")
+        normalized = key.lower()
+        if normalized == "http.extraheader":
+            matches.append((0, index, value))
+        elif normalized.startswith("http.") and normalized.endswith(".extraheader"):
+            scope = key[5:-12]
+            if target.startswith(scope):
+                matches.append((len(scope), index, value))
+    if not matches:
+        sys.exit(1)
+    os.write(1, (max(matches)[2] + "\\0").encode())
+    sys.exit(0)
+
 # Probe call from preflight: ls-remote --heads --exit-code <url>
 if argv[:1] == ["ls-remote"]:
+    helpers = []
+    count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    for index in range(count):
+        key = os.environ.get(f"GIT_CONFIG_KEY_{index}", "").lower()
+        value = os.environ.get(f"GIT_CONFIG_VALUE_{index}", "")
+        if key == "credential.helper" or (
+            key.startswith("credential.") and key.endswith(".helper")
+        ):
+            if value:
+                helpers.append(value)
+            else:
+                helpers.clear()
+    for helper in helpers:
+        if helper.startswith("!"):
+            subprocess.run([helper[1:]], check=False)
+
     # Look for a bearer header injected via GIT_CONFIG_VALUE_<n>.
     has_bearer = False
     for k, v in os.environ.items():
@@ -184,6 +220,53 @@ def test_preflight_falls_back_from_stale_pat_to_bearer(tmp_path, monkeypatch):
 
     # Should NOT raise. Before the fix, this raised AuthenticationError.
     _preflight_auth_check(ctx, resolver, verbose=False)
+
+
+def test_install_validation_never_invokes_ado_native_credential_helper(
+    tmp_path,
+    monkeypatch,
+):
+    """A PAT 401 retries with az bearer without activating ambient helpers."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "helper-invoked"
+    helper = bin_dir / "sentinel-helper"
+    _write_fake(
+        helper,
+        (
+            "#!/usr/bin/env python3\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['SENTINEL_HELPER_MARKER']).write_text('invoked', encoding='ascii')\n"
+        ),
+    )
+    _write_fake(bin_dir / "git", FAKE_GIT)
+    _write_fake(bin_dir / "az", FAKE_AZ)
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}/usr/bin:/bin")
+    monkeypatch.setenv("ADO_APM_PAT", "stale-pat-value")
+    monkeypatch.setenv("SENTINEL_HELPER_MARKER", str(marker))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv(
+        "GIT_CONFIG_KEY_0",
+        "credential.https://dev.azure.com/myorg/myproject/_git/myrepo.helper",
+    )
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", f"!{helper}")
+    monkeypatch.delenv("AZURE_CLI_TEST_DEV_SP_NAME", raising=False)
+
+    from apm_cli.core.auth import AuthResolver
+    from apm_cli.core.azure_cli import get_bearer_provider
+    from apm_cli.install.validation import _validate_package_exists
+
+    get_bearer_provider().clear_cache()
+    assert (
+        _validate_package_exists(
+            "dev.azure.com/myorg/myproject/_git/myrepo",
+            auth_resolver=AuthResolver(),
+        )
+        is True
+    )
+    assert not marker.exists()
 
 
 def test_preflight_still_raises_when_both_pat_and_bearer_fail(tmp_path, monkeypatch):

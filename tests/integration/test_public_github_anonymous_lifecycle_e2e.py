@@ -86,9 +86,14 @@ def _child_environment(
     environment["NO_PROXY"] = "127.0.0.1,localhost"
     environment["no_proxy"] = "127.0.0.1,localhost"
     environment["GIT_ALLOW_PROTOCOL"] = "file:http:https"
-    environment["GIT_CONFIG_COUNT"] = "1"
-    environment["GIT_CONFIG_KEY_0"] = "credential.interactive"
-    environment["GIT_CONFIG_VALUE_0"] = "never"
+    count = int(environment.get("GIT_CONFIG_COUNT", "0"))
+    if not any(
+        environment.get(f"GIT_CONFIG_KEY_{index}", "").lower() == "credential.interactive"
+        for index in range(count)
+    ):
+        environment["GIT_CONFIG_COUNT"] = str(count + 1)
+        environment[f"GIT_CONFIG_KEY_{count}"] = "credential.interactive"
+        environment[f"GIT_CONFIG_VALUE_{count}"] = "never"
     assert environment["HOME"] == str(isolated.home)
     return environment
 
@@ -199,7 +204,7 @@ def test_all_public_graph_lifecycle_never_resolves_or_leaks_credentials(
             "GITHUB_APM_PAT": "ambient-pat-must-be-stripped",
             "GITHUB_TOKEN": "ambient-actions-token-must-be-stripped",
             "GIT_CONFIG_COUNT": "2",
-            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
             "GIT_CONFIG_VALUE_0": "Authorization: Bearer ambient-header",
             "GIT_CONFIG_KEY_1": "credential.interactive",
             "GIT_CONFIG_VALUE_1": "never",

@@ -413,6 +413,35 @@ class TestBuildValidationAttempts:
             "https://dev.azure.com/myorg/myproject/_git/myrepo",
         )
 
+    def test_ado_attempts_never_construct_native_credential_helper_env(self) -> None:
+        """ADO validation uses only AuthResolver PAT or bearer environments."""
+        dl = _make_downloader()
+        dl.auth_resolver.resolve_for_dep.return_value.token = "myPAT"
+        dl.auth_resolver.resolve_for_dep.return_value.auth_scheme = "basic"
+        dl.auth_resolver.git_env_for_remote.return_value = {"CANONICAL": "ado"}
+        dl.auth_resolver.build_native_git_credential_env.side_effect = AssertionError(
+            "native helper must not be considered for ADO"
+        )
+        dep = self._make_dep()
+        dep.is_azure_devops.return_value = True
+        dep.host = "dev.azure.com"
+        dep.repo_url = "myorg/myproject/_git/myrepo"
+        dep.ado_organization = "myorg"
+        dep.ado_project = "myproject"
+        dep.ado_repo = "myrepo"
+        dl.auth_resolver.classify_host.return_value = MagicMock(kind="ado")
+
+        attempts = _build_validation_attempts(dl, dep, lambda _message: None)
+
+        assert attempts == [
+            AttemptSpec(
+                "ADO authenticated HTTPS (basic header)",
+                "https://dev.azure.com/myorg/myproject/_git/myrepo",
+                {"CANONICAL": "ado"},
+            )
+        ]
+        dl.auth_resolver.build_native_git_credential_env.assert_not_called()
+
     def test_github_token_delegates_header_format_to_auth_resolver(self) -> None:
         dl = _make_downloader(token="ghp_token")
         dl.auth_resolver.resolve_for_dep.return_value.token = "ghp_token"
@@ -452,11 +481,13 @@ class TestBuildValidationAttempts:
 
         attempts = _build_validation_attempts(dl, dep, lambda m: None)
         token_env = attempts[0].env
-        assert token_env["GIT_CONFIG_COUNT"] == "2"
+        assert token_env["GIT_CONFIG_COUNT"] == "3"
         assert token_env["GIT_CONFIG_KEY_0"] == "safe.bareRepository"
         assert token_env["GIT_CONFIG_VALUE_0"] == "explicit"
-        assert token_env["GIT_CONFIG_KEY_1"] == "http.extraheader"
-        header = token_env["GIT_CONFIG_VALUE_1"]
+        assert token_env["GIT_CONFIG_KEY_1"] == "credential.helper"
+        assert token_env["GIT_CONFIG_VALUE_1"] == ""
+        assert token_env["GIT_CONFIG_KEY_2"] == "http.extraheader"
+        header = token_env["GIT_CONFIG_VALUE_2"]
         assert header.startswith("Authorization: Basic ")
         encoded = header.removeprefix("Authorization: Basic ")
         assert base64.b64decode(encoded).decode() == "x-access-token:ghp_token"
@@ -538,6 +569,61 @@ class TestRefExistsViaLsRemote:
 
         assert ok is False
         assert _winning is None
+
+    def test_ado_pat_401_uses_canonical_bearer_retry(self) -> None:
+        """Virtual-package ref validation retries ADO through AuthResolver only."""
+        dl = _make_downloader()
+        dep = _make_github_dep()
+        dep.is_azure_devops.return_value = True
+        dep.host = "dev.azure.com"
+        dep.repo_url = "myorg/myproject/_git/myrepo"
+        dl.auth_resolver.resolve_for_dep.return_value.source = "ADO_APM_PAT"
+        primary = AttemptSpec(
+            "ADO authenticated HTTPS (basic header)",
+            "https://dev.azure.com/myorg/myproject/_git/myrepo",
+            {"PRIMARY": "1"},
+        )
+        calls: list[dict[str, str]] = []
+
+        def fake_remote(_url, *_patterns, env, **_kwargs):
+            calls.append(env)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(
+                    ["git", "ls-remote"],
+                    128,
+                    stdout="",
+                    stderr="fatal: Authentication failed (401)",
+                )
+            return subprocess.CompletedProcess(
+                ["git", "ls-remote"],
+                0,
+                stdout="a" * 40 + "\trefs/heads/main\n",
+                stderr="",
+            )
+
+        def canonical_fallback(_dep, primary_op, bearer_op, is_auth_failure):
+            first = primary_op()
+            assert is_auth_failure(first)
+            second = bearer_op("selected-az-bearer")
+            return type("Outcome", (), {"outcome": second, "bearer_attempted": True})()
+
+        dl.auth_resolver.execute_with_bearer_fallback.side_effect = canonical_fallback
+        dl.auth_resolver.build_ado_bearer_git_env.return_value = {"BEARER": "1"}
+
+        with (
+            patch.object(gdv, "_build_validation_attempts", return_value=[primary]),
+            patch("apm_cli.utils.git_env.git_remote_refs", side_effect=fake_remote),
+        ):
+            ok, winning = _ref_exists_via_ls_remote(dl, dep, "main", self._log)
+
+        assert ok is True
+        assert winning == AttemptSpec(
+            "ADO authenticated HTTPS (bearer header)",
+            primary.url,
+            {"BEARER": "1"},
+        )
+        assert calls == [{"PRIMARY": "1"}, {"BEARER": "1"}]
+        dl.auth_resolver.execute_with_bearer_fallback.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

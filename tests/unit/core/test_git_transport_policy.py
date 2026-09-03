@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import subprocess
 from pathlib import Path
@@ -29,6 +30,7 @@ _PLATFORM_TOKENS = {
     "GIT_CONFIG_KEY_0": "http.extraheader",
     "GIT_CONFIG_VALUE_0": "Authorization: sentinel",
 }
+_AMBIENT_HEADER_TOKEN = "github_pat_" + "Z" * 30
 
 
 class _TokenManager:
@@ -265,6 +267,272 @@ def test_native_credential_env_drops_managed_token_and_retains_helper_config(
         env=env,
     )
     assert result.stdout == b"\n"
+
+
+def _urlmatched_headers(env: dict[str, str], remote_url: str) -> list[str]:
+    """Return the effective extraHeader values selected by real Git."""
+    result = subprocess.run(
+        (
+            get_git_executable(),
+            "config",
+            "--get-urlmatch",
+            "http.extraHeader",
+            remote_url,
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode in {0, 1}, result.stderr
+    return result.stdout.splitlines()
+
+
+def _ambient_auth_config(path: Path, remote_url: str) -> None:
+    """Write URL-scoped stale auth plus a safe header and native helper."""
+    path.write_text(
+        f'[http "{remote_url}"]\n'
+        "\textraHeader = Authorization: Basic ambient-stale\n"
+        f"\textraHeader = X-Metadata: {_AMBIENT_HEADER_TOKEN}\n"
+        "\textraHeader = X-Trace-Id: safe-value\n"
+        "[credential]\n"
+        "\thelper = ambient-helper\n",
+        encoding="ascii",
+    )
+
+
+def test_public_github_anonymous_fence_beats_url_scoped_ambient_auth(
+    tmp_path: Path,
+) -> None:
+    """Git's URL matcher sees safe headers but no credential on anonymous probes."""
+    remote_url = "https://github.com/acme/widgets.git"
+    config = tmp_path / "gitconfig"
+    _ambient_auth_config(config, remote_url)
+    base_env = {
+        "PATH": os.environ["PATH"],
+        "GIT_CONFIG_GLOBAL": str(config),
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+
+    anonymous = AuthResolver.build_public_github_anonymous_git_env(base_env=base_env)
+    child = git_network_env(remote_url, anonymous)
+    headers = _urlmatched_headers(child, remote_url)
+
+    assert headers == ["X-Trace-Id: safe-value"]
+    assert "ambient-stale" not in repr(child)
+    assert _AMBIENT_HEADER_TOKEN not in repr(child)
+    scoped_values = subprocess.run(
+        (
+            get_git_executable(),
+            "config",
+            "--get-all",
+            f"http.{remote_url}.extraheader",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=child,
+    ).stdout.splitlines()
+    assert scoped_values == ["", "X-Trace-Id: safe-value"]
+    helpers = subprocess.run(
+        (get_git_executable(), "config", "--get-all", "credential.helper"),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=child,
+    ).stdout.splitlines()
+    assert helpers[-1:] == [""]
+
+
+def test_anonymous_snapshot_preserves_safe_header_from_normal_global_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hardened base still snapshots safe entries from HOME's gitconfig."""
+    remote_url = "https://github.com/acme/widgets.git"
+    home = tmp_path / "home"
+    home.mkdir()
+    _ambient_auth_config(home / ".gitconfig", remote_url)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+
+    anonymous = AuthResolver.build_public_github_anonymous_git_env()
+    child = git_network_env(remote_url, anonymous)
+
+    assert _urlmatched_headers(child, remote_url) == ["X-Trace-Id: safe-value"]
+    assert "ambient-stale" not in repr(child)
+    assert _AMBIENT_HEADER_TOKEN not in repr(child)
+
+
+@pytest.mark.parametrize(
+    ("kind", "host", "remote_path", "scheme", "expected_prefix"),
+    (
+        ("github", "github.com", "/acme/widgets.git", "basic", "Basic "),
+        ("ghe_cloud", "acme.ghe.com", "/acme/widgets.git", "basic", "Basic "),
+        ("ghes", "github.acme.test", "/acme/widgets.git", "basic", "Basic "),
+        ("gitlab", "gitlab.com", "/acme/widgets.git", "basic", "Basic "),
+        ("ado", "dev.azure.com", "/acme/project/_git/widgets", "basic", "Basic "),
+        ("ado", "dev.azure.com", "/acme/project/_git/widgets", "bearer", "Bearer "),
+    ),
+)
+def test_managed_fence_selects_only_resolver_header_for_effective_url(
+    tmp_path: Path,
+    kind: str,
+    host: str,
+    remote_path: str,
+    scheme: str,
+    expected_prefix: str,
+) -> None:
+    """Managed hosts replace URL-scoped ambient auth without dropping safe headers."""
+    remote_url = f"https://{host}{remote_path}"
+    config = tmp_path / f"{kind}-{scheme}.gitconfig"
+    _ambient_auth_config(config, remote_url)
+
+    class _ConfiguredTokenManager(_TokenManager):
+        def setup_environment(self) -> dict[str, str]:
+            return {
+                **super().setup_environment(),
+                "GIT_CONFIG_GLOBAL": str(config),
+            }
+
+    token = "resolver-selected-token"
+    context = AuthContext(
+        token=token,
+        source="test",
+        token_type="unknown",
+        host_info=HostInfo(
+            host=host,
+            kind=kind,
+            has_public_repos=kind == "github",
+            api_base=f"https://{host}/api",
+        ),
+        git_env={},
+        auth_scheme=scheme,
+    )
+
+    managed = AuthResolver(token_manager=_ConfiguredTokenManager()).git_env_for_remote(
+        context,
+        remote_url,
+    )
+    child = git_network_env(remote_url, managed)
+    headers = _urlmatched_headers(child, remote_url)
+
+    assert len(headers) == 1
+    assert headers[0].startswith(f"Authorization: {expected_prefix}")
+    assert "ambient-stale" not in repr(child)
+    assert _AMBIENT_HEADER_TOKEN not in repr(child)
+    scoped_values = subprocess.run(
+        (
+            get_git_executable(),
+            "config",
+            "--get-all",
+            f"http.{remote_url}.extraheader",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=child,
+    ).stdout.splitlines()
+    assert scoped_values == [
+        "",
+        "X-Trace-Id: safe-value",
+        headers[0],
+    ]
+    if scheme == "bearer":
+        assert headers[0] == f"Authorization: Bearer {token}"
+    else:
+        encoded = headers[0].split(" ", 2)[2]
+        decoded = base64.b64decode(encoded).decode()
+        expected_user = (
+            "oauth2" if kind == "gitlab" else ("" if kind == "ado" else "x-access-token")
+        )
+        assert decoded == f"{expected_user}:{token}"
+
+    sibling_headers = _urlmatched_headers(child, f"https://{host}/other/repo.git")
+    assert all(not value.lower().startswith("authorization:") for value in sibling_headers)
+
+
+def test_generic_https_fence_removes_ambient_header_but_preserves_native_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generic HTTPS delegates only through native helpers, never ambient headers."""
+    remote_url = "https://git.acme.test/acme/widgets.git"
+    config = tmp_path / "generic.gitconfig"
+    _ambient_auth_config(config, remote_url)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    resolver = AuthResolver(token_manager=_TokenManager())
+
+    native = resolver.git_env_for_remote(_context("generic"), remote_url)
+    child = git_network_env(remote_url, native)
+
+    assert _urlmatched_headers(child, remote_url) == ["X-Trace-Id: safe-value"]
+    helpers = subprocess.run(
+        (get_git_executable(), "config", "--get-all", "credential.helper"),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=child,
+    ).stdout.splitlines()
+    assert helpers == ["ambient-helper"]
+    assert "ambient-stale" not in repr(child)
+    assert _AMBIENT_HEADER_TOKEN not in repr(child)
+
+
+def test_managed_header_is_scoped_to_effective_rewritten_url(tmp_path: Path) -> None:
+    """A same-origin rewrite receives selected auth only at its effective path."""
+    requested = "https://github.com/acme/widgets.git"
+    effective = "https://github.com/mirror/widgets.git"
+    config = tmp_path / "rewrite.gitconfig"
+    config.write_text(
+        f'[url "{effective}"]\n'
+        f"\tinsteadOf = {requested}\n"
+        f'[http "{effective}"]\n'
+        "\textraHeader = Authorization: Basic ambient-stale\n"
+        "\textraHeader = X-Trace-Id: safe-value\n",
+        encoding="ascii",
+    )
+
+    class _ConfiguredTokenManager(_TokenManager):
+        def setup_environment(self) -> dict[str, str]:
+            return {
+                **super().setup_environment(),
+                "GIT_CONFIG_GLOBAL": str(config),
+            }
+
+    token = "rewrite-selected-token"
+    context = AuthContext(
+        token=token,
+        source="test",
+        token_type="unknown",
+        host_info=HostInfo(
+            host="github.com",
+            kind="github",
+            has_public_repos=True,
+            api_base="https://api.github.com",
+        ),
+        git_env={},
+    )
+    env = AuthResolver(token_manager=_ConfiguredTokenManager()).git_env_for_remote(
+        context,
+        requested,
+    )
+
+    child = git_network_env(requested, env)
+    matched = _urlmatched_headers(child, effective)
+
+    assert len(matched) == 1
+    assert matched[0].startswith("Authorization: Basic ")
+    assert "ambient-stale" not in repr(child)
+    exact_keys = {
+        child[f"GIT_CONFIG_KEY_{index}"]
+        for index in range(int(child["GIT_CONFIG_COUNT"]))
+        if child[f"GIT_CONFIG_VALUE_{index}"] == matched[0]
+    }
+    assert exact_keys == {f"http.{effective}.extraheader"}
+    assert _urlmatched_headers(child, "https://github.com/other/repo.git") == []
 
 
 @pytest.mark.parametrize("reset_scope", ("local", "worktree"))

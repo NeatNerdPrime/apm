@@ -1133,11 +1133,13 @@ class TestBuildGitEnvBearerIsolation:
         }
         with patch.dict(os.environ, inherited, clear=False):
             env = AuthResolver._build_git_env("fresh-jwt", scheme="bearer", host_kind="ado")
-        assert env["GIT_CONFIG_COUNT"] == "2"
+        assert env["GIT_CONFIG_COUNT"] == "3"
         assert env["GIT_CONFIG_KEY_0"] == "http.sslCAInfo"
         assert env["GIT_CONFIG_VALUE_0"] == "/corporate/ca.pem"
-        assert env["GIT_CONFIG_KEY_1"] == "http.extraheader"
-        assert env["GIT_CONFIG_VALUE_1"] == "Authorization: Bearer fresh-jwt"
+        assert env["GIT_CONFIG_KEY_1"] == "credential.helper"
+        assert env["GIT_CONFIG_VALUE_1"] == ""
+        assert env["GIT_CONFIG_KEY_2"] == "http.extraheader"
+        assert env["GIT_CONFIG_VALUE_2"] == "Authorization: Bearer fresh-jwt"
         assert not any("inherited-secret" in str(v) for v in env.values())
 
 

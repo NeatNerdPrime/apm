@@ -78,11 +78,13 @@ def test_bearer_retry_sets_header_preserving_retained_git_config(tmp_path: Path)
 
     assert len(envs_seen) == 2, "expected PAT attempt then bearer retry"
     bearer_env = envs_seen[-1]
-    assert bearer_env["GIT_CONFIG_COUNT"] == "2"
+    assert bearer_env["GIT_CONFIG_COUNT"] == "3"
     assert bearer_env["GIT_CONFIG_KEY_0"] == "safe.bareRepository"
     assert bearer_env["GIT_CONFIG_VALUE_0"] == "explicit"
-    assert bearer_env["GIT_CONFIG_KEY_1"] == "http.extraheader"
-    assert bearer_env["GIT_CONFIG_VALUE_1"] == "Authorization: Bearer fake-bearer-token"
+    assert bearer_env["GIT_CONFIG_KEY_1"] == "credential.helper"
+    assert bearer_env["GIT_CONFIG_VALUE_1"] == ""
+    assert bearer_env["GIT_CONFIG_KEY_2"] == "http.extraheader"
+    assert bearer_env["GIT_CONFIG_VALUE_2"] == "Authorization: Bearer fake-bearer-token"
     # The retry must not mutate the host's shared base env.
     assert host.git_env["GIT_CONFIG_COUNT"] == "1"
 

@@ -585,6 +585,7 @@ def test_clear_git_auth_env_only_removes_real_auth_channels() -> None:
     assert _indexed_git_config(env) == [
         ("http.sslCAInfo", "/authorization/corporate-ca.pem"),
         ("custom.policy", "X-Custom: authorization=reviewed"),
+        ("http.extraHeader", "X-Harmless: value"),
     ]
 
 

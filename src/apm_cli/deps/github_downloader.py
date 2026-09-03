@@ -38,6 +38,7 @@ from ..utils.git_env import (
     git_no_hooks_args,
     git_subprocess_error_text,
     git_worktree_head,
+    redact_git_diagnostic,
 )
 from ..utils.git_sparse import (
     apply_sparse_cone,
@@ -48,7 +49,6 @@ from ..utils.git_sparse import (
 from ..utils.github_host import (
     default_host,
     is_github_hostname,
-    sanitize_token_url_in_message,
 )
 from ..utils.yaml_io import yaml_to_str
 from .bare_cache import (
@@ -625,39 +625,8 @@ class GitHubPackageDownloader:
         )
 
     def _sanitize_git_error(self, error_message: str) -> str:
-        """Sanitize Git error messages to remove potentially sensitive authentication information.
-        Args:
-            error_message: Raw error message from Git operations
-
-        Returns:
-            str: Sanitized error message with sensitive data removed
-        """
-        import re
-
-        # Remove any tokens that might appear in URLs for github hosts (format: https://token@host)
-        # Sanitize for default host and common enterprise hosts via helper
-        sanitized = sanitize_token_url_in_message(error_message, host=default_host())
-
-        # Sanitize Azure DevOps URLs - both cloud (dev.azure.com) and any on-prem server
-        # Use a generic pattern to catch https://token@anyhost format for all hosts
-        # This catches: dev.azure.com, ado.company.com, tfs.internal.corp, etc.
-        sanitized = re.sub(r"https://[^@\s]+@([^\s/]+)", r"https://***@\1", sanitized)
-
-        # Remove any tokens that might appear as standalone values
-        sanitized = re.sub(
-            r"(ghp_|gho_|ghu_|ghs_|ghr_|glpat[_-])[a-zA-Z0-9_\-]+",
-            "***",
-            sanitized,
-        )
-
-        # Remove environment variable values that might contain tokens
-        sanitized = re.sub(
-            r"(GITHUB_TOKEN|GITHUB_APM_PAT|ADO_APM_PAT|GH_TOKEN|GITHUB_COPILOT_PAT|GITLAB_APM_PAT|GITLAB_TOKEN)=[^\s]+",
-            r"\1=***",
-            sanitized,
-        )
-
-        return sanitized
+        """Delegate Git diagnostic redaction to its canonical owner."""
+        return redact_git_diagnostic(error_message)
 
     def _build_repo_url(
         self,
@@ -1370,13 +1339,14 @@ class GitHubPackageDownloader:
                 )
                 if result.returncode != 0:
                     _debug(
-                        f"Sparse-checkout step failed ({' '.join(cmd)}): {result.stderr.strip()}"
+                        f"Sparse-checkout step failed ({' '.join(cmd)}): "
+                        f"{redact_git_diagnostic(result.stderr.strip())}"
                     )
                     return False
 
             return _repair(env)
         except Exception as e:
-            _debug(f"Sparse-checkout failed: {e}")
+            _debug(f"Sparse-checkout failed: {git_subprocess_error_text(e)}")
             return False
 
     def download_subdirectory_package(
