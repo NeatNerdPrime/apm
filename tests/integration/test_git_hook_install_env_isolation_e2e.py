@@ -11,9 +11,12 @@ from pathlib import Path
 import pytest
 
 from tests.integration.test_marketplace_generic_https_credential_lifecycle import (
+    _DENY_PROXY,
     _HELPER_PASSWORD,
+    _configure_git_https_fixture,
     _git_exec_path,
     _real_git,
+    _verify_git_https_fixture,
     _write_credential_helper,
     _write_tls_certificate,
 )
@@ -157,8 +160,9 @@ def test_generic_https_dependency_helper_receives_no_platform_credentials(
         tmp_path / "scenario",
         base_env=dict(os.environ),
     )
+    real_git = _real_git()
     helper_log = isolated.root / "credential-helper.json"
-    _write_credential_helper(isolated.home, helper_log)
+    _write_credential_helper(real_git, isolated.home, helper_log)
     environment = isolated.subprocess_env()
     environment.update(
         {
@@ -170,10 +174,16 @@ def test_generic_https_dependency_helper_receives_no_platform_credentials(
             "GIT_TOKEN": "git-sentinel",
             "APM_TEST_HELPER_LOG": str(helper_log),
             "GIT_ALLOW_PROTOCOL": "file:http:https",
-            "GIT_SSL_NO_VERIFY": "1",
+            "ALL_PROXY": _DENY_PROXY,
+            "HTTP_PROXY": _DENY_PROXY,
+            "HTTPS_PROXY": _DENY_PROXY,
+            "NO_PROXY": "",
+            "all_proxy": _DENY_PROXY,
+            "http_proxy": _DENY_PROXY,
+            "https_proxy": _DENY_PROXY,
+            "no_proxy": "",
         }
     )
-    real_git = _real_git()
     environment["GIT_EXEC_PATH"] = _git_exec_path(real_git)
     package_factory = LocalPackageFactory(isolated.package_root)
     source = package_factory.create("generic-source")
@@ -202,6 +212,19 @@ def test_generic_https_dependency_helper_receives_no_platform_credentials(
     ) as server:
         remote_url = "https://git.example.test/acme/generic-dependency.git"
         local_url = server.remote_url(repository)
+        _configure_git_https_fixture(
+            real_git,
+            remote_base_url=server.proxy_url,
+            config_paths=(
+                Path(environment["GIT_CONFIG_GLOBAL"]),
+                isolated.home / ".gitconfig",
+            ),
+        )
+        _verify_git_https_fixture(
+            real_git,
+            remote_url=local_url,
+            environment=environment,
+        )
         environment["GIT_CONFIG_COUNT"] = "1"
         environment["GIT_CONFIG_KEY_0"] = f"url.{local_url}.insteadOf"
         environment["GIT_CONFIG_VALUE_0"] = remote_url
