@@ -41,6 +41,7 @@
         "transport-platform-git-child-environment",
         "transport-platform-git-clone-hooks-disabled",
         "transport-platform-git-url-credentials-out-of-argv",
+        "transport-platform-git-url-rewrite-enforcement",
         "transport-platform-git-url-rewrite-once",
         "transport-platform-git-url-rewrite-routing",
         "transport-platform-git-url-rewrite-safety"

@@ -601,6 +601,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Authenticated GitHub clone URLs regain process-visible credentials.",
     ),
     MutationCase(
+        guard_id="transport-platform-git-url-rewrite-enforcement",
+        rule_id="transport-platform-git-child-environment",
+        path="src/apm_cli/utils/git_env.py",
+        old="    effective_url = validate_git_url_rewrite_safety(",
+        new="    effective_url = (lambda *_args, **_kwargs: None)(",
+        intent="The canonical network environment bypasses URL rewrite validation.",
+    ),
+    MutationCase(
         guard_id="transport-platform-git-url-rewrite-once",
         rule_id="transport-platform-git-child-environment",
         path="src/apm_cli/deps/clone_engine.py",

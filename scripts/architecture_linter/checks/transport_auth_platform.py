@@ -51,6 +51,7 @@ _RID_HOST_CRED = "transport-platform-host-credential-resolution"
 _RID_GIT_CHILD_ENV = "transport-platform-git-child-environment"
 _RID_GIT_CLONE_HOOKS = "transport-platform-git-clone-hooks-disabled"
 _RID_GIT_URL_CREDENTIALS = "transport-platform-git-url-credentials-out-of-argv"
+_RID_GIT_URL_ENFORCEMENT = "transport-platform-git-url-rewrite-enforcement"
 _RID_GIT_URL_ONCE = "transport-platform-git-url-rewrite-once"
 _RID_GIT_URL_ROUTING = "transport-platform-git-url-rewrite-routing"
 _RID_GIT_URL_REWRITE = "transport-platform-git-url-rewrite-safety"
@@ -336,6 +337,7 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 "def git_remote_refs(",
                 "def _append_git_url_rewrites(",
                 "def resolve_git_url_rewrite(",
+                "effective_url = validate_git_url_rewrite_safety(",
                 "clone_env = git_clone_env(",
                 'return "-c", "core.hooksPath=/dev/null"',
                 "def validate_git_url_rewrite_safety(",
@@ -871,6 +873,7 @@ RULES: tuple[Rule, ...] = (
             _RID_GIT_CHILD_ENV,
             _RID_GIT_CLONE_HOOKS,
             _RID_GIT_URL_CREDENTIALS,
+            _RID_GIT_URL_ENFORCEMENT,
             _RID_GIT_URL_ONCE,
             _RID_GIT_URL_ROUTING,
             _RID_GIT_URL_REWRITE,
