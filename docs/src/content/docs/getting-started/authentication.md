@@ -32,8 +32,9 @@ APM preserves safe `url.<base>.insteadOf` rules, including HTTPS-to-SSH and
 local mirror rewrites. Before each dependency Git operation that consumes a
 remote URL, it rejects a matching rewrite that embeds credentials, downgrades
 transport security, selects remote-helper syntax such as `ext::` or `https::`,
-or redirects an authenticated HTTPS request to another origin. This prevents a
-rewrite from carrying a resolved token to a different endpoint.
+or redirects a network remote to another host. Same-host HTTPS-to-SSH and local
+mirror rewrites remain supported. This prevents a rewrite from changing package
+provenance or carrying a resolved token to a different endpoint.
 
 If a rewrite is rejected, find its source and remove or replace it:
 
@@ -41,14 +42,21 @@ If a rewrite is rejected, find its source and remove or replace it:
 git config --show-origin --get-regexp '^url\..*\.insteadOf$'
 ```
 
+If the selected rewrite is a `file://` mirror and the clone fails, verify that
+the local path exists and is readable. Fix or remove that rewrite; configuring
+an SSH key or token does not repair a missing local mirror.
+
 APM evaluates clone rewrites without the invoking repository's local
 `.git/config`, because `git clone` does not consume that local config.
-It snapshots effective global and system Git config, validates every indexed
-rewrite value, passes the snapshot to the child process, and disables later
-reads from mutable global and system files. Repository-local config is
-considered only for APM-owned caches and worktrees and is revalidated before
-remote use. Dependency clone and init commands ignore Git templates, and
-checkout hooks remain disabled.
+It snapshots effective global and system Git config, selects and validates Git's
+longest matching rewrite for the remote, passes the flattened snapshot to the
+child process, and disables later reads from mutable global and system files.
+Repository-local config is considered only for APM-owned caches and worktrees
+and its network-relevant entries are copied into the ordered snapshot, then
+revalidated after materialization and before remote use. Later file changes
+cannot remove a validated empty-header reset from the child environment.
+Dependency clone and init commands ignore Git templates, and checkout hooks
+remain disabled.
 
 ## Token lookup
 ### GitHub-class hosts (`github.com`, `*.ghe.com`, GHES via `GITHUB_HOST`)

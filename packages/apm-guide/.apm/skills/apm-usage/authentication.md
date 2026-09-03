@@ -11,17 +11,25 @@ Authorization headers. They are never embedded in Git URL userinfo.
 
 Before each dependency Git operation that consumes a remote URL, APM rejects a
 matching rewrite that embeds credentials, downgrades transport security, selects
-remote-helper syntax such as `ext::` or `https::`, or redirects an authenticated
-HTTPS request to another origin. Inspect rejected rules with:
+remote-helper syntax such as `ext::` or `https::`, or redirects a network remote
+to another host. Same-host HTTPS-to-SSH and local mirror rewrites remain
+supported. Inspect rejected rules with:
 
 ```bash
 git config --show-origin --get-regexp '^url\..*\.insteadOf$'
 ```
 
-APM snapshots effective global and system Git config, validates every indexed
-rewrite value, passes the snapshot to the child process, and disables later
-reads from mutable global and system files. Repository-local config is used
-only in APM-owned caches and worktrees and is revalidated before remote use.
+If the selected rewrite is a `file://` mirror and the clone fails, verify that
+the local path exists and is readable. Fix or remove that rewrite; host
+credentials cannot repair a missing local mirror.
+
+APM snapshots effective global and system Git config, selects and validates
+Git's longest matching rewrite for the remote, passes the flattened snapshot to
+the child process, and disables later reads from mutable global and system
+files. Repository-local config is used only in APM-owned caches and worktrees
+and its network-relevant entries are copied into the ordered snapshot, then
+revalidated after materialization and before remote use. Later file changes
+cannot remove a validated empty-header reset from the child environment.
 Dependency clone and init commands ignore Git templates, and checkout hooks
 remain disabled.
 

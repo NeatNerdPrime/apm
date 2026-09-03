@@ -216,17 +216,24 @@ safe `url.<base>.insteadOf` rule to that selected URL.
 |---|---|
 | `ssh://...` or `git@host:...` | SSH |
 | `https://...` or `http://...` | The explicit HTTP(S) scheme |
-| Shorthand with `--ssh` or `APM_GIT_PROTOCOL=ssh` | SSH |
+| Shorthand with `--ssh`, `APM_GIT_PROTOCOL=ssh`, or saved `prefer-ssh` | SSH |
 | Other shorthand | HTTPS |
 
-An explicit scheme prevents APM from choosing another protocol, but it does not
-disable your Git `insteadOf` configuration. Safe rules may select SSH or a local
-mirror. Unsafe credential, downgrade, remote-helper, and authenticated
-cross-origin rewrites fail before Git contacts the remote. See
+An explicit scheme prevents APM from choosing another protocol unless
+cross-protocol fallback is enabled, but it does not disable your Git `insteadOf`
+configuration. Safe rules may select the same host over SSH or a local mirror.
+Unsafe credential, downgrade, remote-helper, and cross-host network rewrites fail
+before Git contacts the remote. See
 [Git URL rewrite safety](../../getting-started/authentication/#git-url-rewrite-safety).
+If an effective `file://` mirror fails, check that the local path exists and is
+readable, then inspect the matching `insteadOf` rule. Host credentials cannot
+repair a missing local mirror.
 
 Cross-protocol retry is off by default. Use `--allow-protocol-fallback` or
-`APM_ALLOW_PROTOCOL_FALLBACK=1` only for a migration window.
+`APM_ALLOW_PROTOCOL_FALLBACK=1` only for a migration window. Save a shorthand
+preference with `apm config set prefer-ssh true`, or save the retry escape hatch
+with `apm config set allow-protocol-fallback true`. See the
+[`apm config` reference](../../reference/cli/config/).
 
 ## Pin a version
 

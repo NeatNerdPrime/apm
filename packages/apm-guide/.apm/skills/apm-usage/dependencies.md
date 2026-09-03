@@ -103,12 +103,17 @@ across protocols.
 |-----------------|----------------|
 | `ssh://...` or `git@host:...` | SSH only |
 | `https://...` or `http://...` | HTTP(S) only |
+| Shorthand with `--ssh`, `APM_GIT_PROTOCOL=ssh`, or saved `prefer-ssh` | SSH only |
 | Shorthand otherwise | HTTPS only |
 
 A failed clone fails loudly, naming the URL and the protocol attempted.
-An explicit scheme prevents APM from selecting another protocol. Git still
-applies a matching safe `url.<base>.insteadOf` rule to the selected URL, which
-may choose SSH or a local mirror.
+An explicit scheme prevents APM from selecting another protocol unless
+cross-protocol fallback is enabled. Git still applies a matching safe
+`url.<base>.insteadOf` rule to the selected URL, which may choose the same host
+over SSH or a local mirror.
+If an effective `file://` mirror fails, verify that its path exists and is
+readable, then fix or remove the matching rule. Host credentials do not repair
+a missing local mirror.
 This includes in-repository plugins from GitLab and generic git marketplaces:
 an SSH registration is persisted as SSH `git:` and `path:`; an HTTPS
 registration remains HTTPS.
@@ -123,6 +128,10 @@ export APM_GIT_PROTOCOL=ssh            # session default
 
 `--ssh` and `--https` are mutually exclusive and apply only to shorthand.
 URLs with an explicit scheme ignore them.
+Use `apm config set prefer-ssh true` to persist the shorthand preference.
+Cross-protocol retry remains off unless `--allow-protocol-fallback`,
+`APM_ALLOW_PROTOCOL_FALLBACK=1`, or
+`apm config set allow-protocol-fallback true` enables it.
 The selected protocol also governs remote tag enumeration when APM resolves a
 Git-source semver range.
 
