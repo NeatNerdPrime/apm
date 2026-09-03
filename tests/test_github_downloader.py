@@ -365,7 +365,12 @@ class TestEnterpriseHostHandling:
     """Test enterprise GitHub host handling (PR #33 bug fixes)."""
 
     @patch("apm_cli.deps.github_downloader.Repo")
-    def test_clone_fallback_respects_enterprise_host(self, mock_repo_class, monkeypatch):
+    def test_clone_fallback_respects_enterprise_host(
+        self,
+        mock_repo_class,
+        monkeypatch,
+        tmp_path,
+    ):
         """Test that fallback clone uses enterprise host, not hardcoded github.com.
 
         This tests the bug fix from PR #33 where Method 3 fallback was hardcoded
@@ -376,7 +381,7 @@ class TestEnterpriseHostHandling:
         monkeypatch.setenv("GITHUB_HOST", "company.ghe.com")
         monkeypatch.setenv("GITHUB_APM_PAT", "test-enterprise-token")
 
-        downloader = GitHubPackageDownloader()
+        downloader = GitHubPackageDownloader(allow_fallback=True)
         downloader.github_host = "company.ghe.com"
 
         # Mock clone attempts: first two fail, third succeeds
@@ -389,7 +394,7 @@ class TestEnterpriseHostHandling:
             mock_repo,  # Method 3 succeeds
         ]
 
-        target_path = Path("/tmp/test_enterprise")
+        target_path = tmp_path / "test-enterprise"
 
         with patch("pathlib.Path.exists", return_value=False):
             downloader._clone_with_fallback("team/internal-repo", target_path)
@@ -401,10 +406,9 @@ class TestEnterpriseHostHandling:
         third_call_url = calls[2][0][0]  # First positional arg of third call
 
         # Should use company.ghe.com, NOT github.com
-        assert "company.ghe.com" in third_call_url
-        assert "team/internal-repo" in third_call_url
-        # Ensure it's NOT using github.com
-        assert "github.com" not in third_call_url or "company.ghe.com" in third_call_url
+        parsed = urlparse(third_call_url)
+        assert parsed.hostname == "company.ghe.com"
+        assert parsed.path.rstrip("/") == "/team/internal-repo.git"
 
     def test_host_persists_through_clone_attempts(self, monkeypatch):
         """Test that github_host attribute persists across fallback attempts."""
@@ -773,8 +777,8 @@ class TestAzureDevOpsSupport:
 
             assert env["GIT_SSH_COMMAND"] == "ssh -o ConnectTimeout=60"
 
-    def test_build_repo_url_for_ado_with_token(self):
-        """Test URL building for ADO packages with token."""
+    def test_build_repo_url_for_ado_keeps_token_out_of_userinfo(self):
+        """ADO package URLs remain credential-free."""
         with patch.dict(os.environ, {"ADO_APM_PAT": "ado-token"}, clear=True):
             downloader = GitHubPackageDownloader()
             dep_ref = DependencyReference.parse("dev.azure.com/myorg/myproject/_git/myrepo")
@@ -782,14 +786,10 @@ class TestAzureDevOpsSupport:
             url = downloader._build_repo_url(dep_ref.repo_url, use_ssh=False, dep_ref=dep_ref)
             parsed = urlparse(url)
 
-            # Should build ADO URL with token embedded in userinfo
             assert parsed.hostname == "dev.azure.com"
-            assert "myorg" in parsed.path
-            assert "myproject" in parsed.path
-            assert "_git" in parsed.path
-            assert "myrepo" in parsed.path
-            # Token should be in the URL (as username in https://token@host format)
-            assert parsed.username == "ado-token" or "ado-token" in (parsed.password or "")
+            assert parsed.path == "/myorg/myproject/_git/myrepo"
+            assert parsed.username is None
+            assert parsed.password is None
 
     def test_build_repo_url_for_ado_without_token(self):
         """Test URL building for ADO packages without token."""
@@ -958,9 +958,9 @@ class TestMixedSourceTokenSelection:
             parsed = urlparse(url)
 
             assert parsed.hostname == "dev.azure.com"
-            # ADO token should be used (as username), GitHub token should not
-            assert parsed.username == "ado-token" or "ado-token" in (parsed.password or "")
-            assert "github-token" not in url
+            assert parsed.username is None
+            assert parsed.password is None
+            assert downloader._resolve_dep_auth_ctx(dep_ref).token == "ado-token"
 
     def test_mixed_tokens_bare_owner_repo_with_github_host(self):
         """Test bare owner/repo uses GITHUB_HOST and GITHUB_APM_PAT."""
@@ -1013,13 +1013,15 @@ class TestMixedSourceTokenSelection:
             assert ghe_parsed.hostname == "company.ghe.com"
             assert ado_parsed.hostname == "dev.azure.com"
 
-            # Verify token isolation - ADO token only in ADO URL
-            assert "ado-token" not in github_url
-            assert "ado-token" not in ghe_url
-            assert ado_parsed.username == "ado-token" or "ado-token" in (ado_parsed.password or "")
-
-            # Verify GitHub token not in ADO URL
-            assert "github-token" not in ado_url
+            assert github_parsed.username != "ado-token"
+            assert github_parsed.password != "ado-token"
+            assert ghe_parsed.username != "ado-token"
+            assert ghe_parsed.password != "ado-token"
+            assert ado_parsed.username is None
+            assert ado_parsed.password is None
+            assert downloader._resolve_dep_auth_ctx(github_dep).token == "github-token"
+            assert downloader._resolve_dep_auth_ctx(ghe_dep).token == "github-token"
+            assert downloader._resolve_dep_auth_ctx(ado_dep).token == "ado-token"
 
     def test_github_ado_without_ado_token_falls_back(self):
         """Test ADO without token still builds valid URL."""
