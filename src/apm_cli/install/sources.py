@@ -423,6 +423,7 @@ class CachedDependencySource(DependencySource):
         from apm_cli.bundle.local_bundle import route_agent_plugin_package
         from apm_cli.constants import APM_YML_FILENAME
         from apm_cli.deps.installed_package import InstalledPackage
+        from apm_cli.deps.plugin_parser import has_normalized_plugin_skill_sources_receipt
         from apm_cli.models.apm_package import (
             APMPackage,
             GitReferenceType,
@@ -515,7 +516,18 @@ class CachedDependencySource(DependencySource):
         else:
             apm_yml_path = install_path / APM_YML_FILENAME
             pkg_type, _ = detect_package_type(install_path)
-            if apm_yml_path.exists():
+            if (
+                pkg_type == PackageType.MARKETPLACE_PLUGIN
+                and apm_yml_path.exists()
+                and not has_normalized_plugin_skill_sources_receipt(install_path)
+            ):
+                validation_result = validate_apm_package(install_path, source_path=install_path)
+                if not validation_result.is_valid or validation_result.package is None:
+                    details = "; ".join(validation_result.errors) or "validator returned no package"
+                    raise DirectDependencyError(f"Cached Claude Plugin is invalid: {details}")
+                cached_package = validation_result.package
+                pkg_type = validation_result.package_type
+            elif apm_yml_path.exists():
                 cached_package = APMPackage.from_apm_yml(
                     apm_yml_path,
                     source_path=install_path,

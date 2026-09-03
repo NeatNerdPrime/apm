@@ -16,6 +16,7 @@ from apm_cli.deps.plugin_parser import (
     _map_plugin_artifacts,
     _mcp_servers_to_apm_deps,
     _union_dep_list,
+    has_normalized_plugin_skill_sources_receipt,
     normalize_plugin_directory,
     normalized_plugin_skill_sources,
     parse_plugin_manifest,
@@ -261,6 +262,19 @@ class TestMapPluginArtifacts:
         assert declared is True
         assert not (apm_dir / "skills" / "alpha").exists()
         assert not (apm_dir / "skills" / "beta").exists()
+
+    def test_skill_receipt_presence_rejects_symlink(self, tmp_path):
+        plugin_dir = tmp_path / "plugin"
+        apm_dir = plugin_dir / ".apm"
+        apm_dir.mkdir(parents=True)
+        external = tmp_path / "external-receipt.json"
+        external.write_text("{}", encoding="ascii")
+        try:
+            (apm_dir / ".plugin-skill-sources.json").symlink_to(external)
+        except OSError:
+            pytest.skip("Symlinks not supported on this platform")
+
+        assert not has_normalized_plugin_skill_sources_receipt(plugin_dir)
 
     def test_skill_receipt_removes_prior_skills_for_file_only_declaration(self, tmp_path):
         """A file-only declaration must remove prior parser-owned skill directories."""

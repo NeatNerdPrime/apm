@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from apm_cli.deps.lockfile import LockFile
+from apm_cli.utils.content_hash import compute_package_hash
 from apm_cli.utils.yaml_io import dump_yaml, load_yaml
 from tests.utils.apm_lifecycle_runner import ApmLifecycleRunner, CommandResult
 from tests.utils.isolated_apm_environment import IsolatedApmEnvironment
@@ -710,6 +711,132 @@ def test_required_reinstall_is_byte_idempotent_across_durable_state(
     _assert_same_state(before, after)
     assert all("hook-sidecar" not in file.roles for file in after.files)
     assert audit["passed"] is True
+
+
+def test_required_legacy_content_hash_upgrade_preserves_skills_and_converges(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """Upgrade a receipt-less 0.28 plugin without dropping prior skill claims."""
+    scenario = _new_scenario(tmp_path / "legacy-content-hash", apm_binary_path)
+    package = scenario.sources.create("legacy-hash-kit")
+    scenario.sources.add_skill(package, "legacy-hash", _skill("legacy-hash"))
+    package.manifest_path.unlink()
+    (package.root / "plugin.json").write_text(
+        json.dumps({"name": package.name, "skills": ["./skills/"]}),
+        encoding="ascii",
+    )
+    repository = scenario.repositories.create(package.name, source_tree=package.root)
+    commit = scenario.repositories.commit(repository, message="publish legacy plugin")
+    remote_url = f"https://github.com/{_OWNER}/{package.name}"
+    source = _PublishedPackage(
+        package=package,
+        repository=repository,
+        commit=commit,
+        remote_url=remote_url,
+        dependency={
+            "git": remote_url,
+            "ref": commit.sha,
+            "alias": package.name,
+        },
+        environment=scenario.repositories.url_rewrite_subprocess_env(repository, remote_url),
+    )
+    consumer = scenario.consumers.create(
+        "legacy-hash-consumer",
+        dependencies=(source.dependency,),
+        targets=("claude", "codex"),
+    )
+    capture_args = {
+        "targets": ("claude", "codex"),
+        "config_paths": (
+            PurePosixPath(".claude/skills/legacy-hash/SKILL.md"),
+            PurePosixPath(".agents/skills/legacy-hash/SKILL.md"),
+        ),
+    }
+
+    _run_success(
+        scenario,
+        consumer,
+        _INSTALL_ARGS,
+        environment=source.environment,
+        scenario_id="legacy-content-hash-install-current",
+    )
+    installed = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+    lock_path = consumer.root / "apm.lock.yaml"
+    lock_document = load_yaml(lock_path)
+    dependencies = lock_document["dependencies"]
+    assert len(dependencies) == 1
+    locked_dependency = dependencies[0]
+    current_content_hash = locked_dependency["content_hash"]
+    prior_source_identity = {
+        key: locked_dependency.get(key)
+        for key in ("repo_url", "materialization_repo_url", "resolved_commit", "resolved_ref")
+    }
+    prior_deployed_files = list(locked_dependency["deployed_files"])
+    prior_deployed_hashes = dict(locked_dependency["deployed_file_hashes"])
+
+    cached_package = consumer.root / "apm_modules" / package.name
+    receipt = cached_package / ".apm" / ".plugin-skill-sources.json"
+    assert receipt.is_file()
+    receipt.unlink()
+    # APM 0.28 used the same tree-hash algorithm but did not write the
+    # parser-owned receipt, so hashing this receipt-less cache is its exact hash.
+    legacy_content_hash = compute_package_hash(cached_package)
+    assert legacy_content_hash != current_content_hash
+    lock_document["apm_version"] = "0.28.0"
+    locked_dependency["content_hash"] = legacy_content_hash
+    dump_yaml(lock_document, lock_path)
+
+    legacy = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+    assert legacy.file(".claude/skills/legacy-hash/SKILL.md").kind == "file"
+    assert legacy.file(".agents/skills/legacy-hash/SKILL.md").kind == "file"
+    assert legacy.deployment_records == installed.deployment_records
+    _, legacy_dependency = _single_locked_dependency(consumer.root)
+    assert legacy_dependency.content_hash == legacy_content_hash
+    assert legacy_dependency.deployed_files == prior_deployed_files
+    assert legacy_dependency.deployed_file_hashes == prior_deployed_hashes
+    assert {
+        key: getattr(legacy_dependency, key)
+        for key in ("repo_url", "materialization_repo_url", "resolved_commit", "resolved_ref")
+    } == prior_source_identity
+
+    _run_success(
+        scenario,
+        consumer,
+        _INSTALL_ARGS,
+        environment=source.environment,
+        scenario_id="legacy-content-hash-upgrade",
+    )
+    upgraded = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+    _, upgraded_dependency = _single_locked_dependency(consumer.root)
+
+    assert (
+        upgraded.file(".claude/skills/legacy-hash/SKILL.md").content
+        == installed.file(".claude/skills/legacy-hash/SKILL.md").content
+    )
+    assert (
+        upgraded.file(".agents/skills/legacy-hash/SKILL.md").content
+        == installed.file(".agents/skills/legacy-hash/SKILL.md").content
+    )
+    assert upgraded_dependency.content_hash == current_content_hash
+    assert upgraded_dependency.deployed_files == prior_deployed_files
+    assert upgraded_dependency.deployed_file_hashes == prior_deployed_hashes
+    assert upgraded.deployment_records == legacy.deployment_records
+    assert {
+        key: getattr(upgraded_dependency, key)
+        for key in ("repo_url", "materialization_repo_url", "resolved_commit", "resolved_ref")
+    } == prior_source_identity
+
+    _run_success(
+        scenario,
+        consumer,
+        _INSTALL_ARGS,
+        environment=source.environment,
+        scenario_id="legacy-content-hash-convergence",
+    )
+    converged = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+
+    _assert_same_state(upgraded, converged)
 
 
 def test_required_dependency_prune_then_uninstall_cascades_owned_state(
