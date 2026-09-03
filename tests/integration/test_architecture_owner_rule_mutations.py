@@ -182,6 +182,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Single-file compilation bypasses the root overwrite eligibility owner.",
     ),
     MutationCase(
+        guard_id="contracts-tooling-project-yaml-write-delegation",
+        rule_id="contracts-tooling-project-yaml-write-delegation",
+        path="src/apm_cli/utils/yaml_io.py",
+        old="    atomic_write_text(\n",
+        new="    write_text_lf(\n",
+        intent="The atomic project YAML writer bypasses the canonical atomic writer.",
+    ),
+    MutationCase(
         guard_id="hooks-integrations-copilot-cli-mcp-paths",
         rule_id="mutation_writes.copilot_cli_mcp_paths",
         path="src/apm_cli/adapters/client/copilot.py",

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows users no longer get repeated line-ending churn when APM rewrites
+  `apm.yml`: install, uninstall, dependency resolution, and revision-pin
+  updates now produce deterministic LF output. An `apm.yml` that already uses
+  CRLF line endings normalizes to LF on its next rewrite, causing a one-time
+  whole-file line-ending change. (closes #2624)
+
+## [0.29.0] - 2026-08-26
 ### Changed
 
 - Architecture ownership guards now use a sharded JSON registry and a
@@ -124,6 +133,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outside #2707's scope. (by @MohammedAlkindi, closes #2707, #2710)
 
 ## [0.29.0] - 2026-08-30
+### Fixed
+
+- Project YAML writers now use deterministic LF line endings: rewriting
+  `apm.yml` (install, uninstall, dependency resolution) and the revision-pin
+  update path no longer flip-flops a Windows file's line endings between
+  consecutive commands, ending the resulting git diff churn. A Windows
+  `apm.yml` already in the CRLF domain has a one-time line-ending-only diff
+  on its next rewrite. (closes #2624; group 1 landed in #2638)
+
+## [0.29.0] - 2026-08-26
 
 ### Added
 
