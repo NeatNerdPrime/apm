@@ -137,6 +137,18 @@ Then run `apm install -g --target opencode` to deploy skills to
 `~/.config/opencode/skills/`, followed by `apm compile -g` to update
 `~/.config/opencode/AGENTS.md` with scoped instruction sections.
 
+`apm compile -g` rejects `--target`, so `target:` or `targets:` in
+`~/.apm/apm.yml` selects
+which user-scope root context files it writes. Without that field it writes
+every applicable user-scope root context file. The manifest must be a regular,
+non-symlink file. Malformed or unreadable YAML, a non-mapping document, or an
+invalid target declaration stops compilation before any target output is
+written; fix the reported manifest problem and rerun the command.
+
+An explicit `apm install -g --target` does not replace the manifest declaration.
+Update `~/.apm/apm.yml` before compiling when the install flag selected a
+different target set.
+
 After a project install stages dependency instructions for Gemini, Codex,
 OpenCode, or experimental Hermes, `apm install` prints an `[i]` hint naming
 `apm compile` and the root context files it will update. Targets such as Claude
