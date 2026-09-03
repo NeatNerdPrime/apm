@@ -419,10 +419,13 @@ across targets.
 
 ## Executable trust gate
 
-APM blocks executable primitives from dependency packages by default: hooks,
-`bin/` executables, self-defined MCP servers (`registry: false`), and canvas
-extensions. Text primitives (skills, agents, instructions) are never gated, and
-local root `.apm/` content is always trusted.
+When the executable trust gate is enabled, APM blocks unapproved executable
+primitives from dependency packages: hooks, `bin/` executables, self-defined
+MCP servers (`registry: false`), LSP servers, and canvas extensions. The gate is
+opt-in for backward compatibility; a project `executables:` block or org policy
+enables it. Text primitives (skills, agents, instructions) are never gated, and
+local root `.apm/` content is always trusted. Supported runtimes may start an
+approved generated LSP command automatically after install.
 
 Trust is expressed through one noun, `executables`, across three layers, and the
 install gate and `apm audit` resolve it through a single deny-wins,
@@ -445,14 +448,17 @@ first-match-wins ladder:
 - **Project** (`apm.yml` `executables.{allow,deny}`) is committed admin trust,
   shared with the team.
 - **User** (`~/.apm/config.json` `executables.{allow,deny}`) is the lowest
-  authority -- a machine-local override that can only narrow, never widen past
-  an org or project deny.
+  authority. `apm approve --user` can grant machine-local trust when no org or
+  project deny blocks it; `apm deny --user` narrows trust on one machine.
 
 Personal consent can never widen past an org deny, and the default (rung 7) is
 **gated pending approval** -- a package with executables and no opinion anywhere
 is parked until approved, not hard-denied. This release ships no `enforce`
-mandate runtime, no signing, and no content-hash binding; an org
-`executables.enforce` rung degrades to `recommend`.
+mandate runtime or package signing; an org `executables.enforce` rung degrades
+to `recommend`. Local bundle MCP, LSP, and canvas approvals are narrower: APM
+prints an exact `executables.allow` key containing the bundle's SHA-256 content
+digest, so another bundle that claims the same package name cannot inherit that
+consent.
 
 Each locked dependency records its resolved state in the `exec_status` field of
 `apm.lock.yaml` (`deployed`, `gated_pending_approval`, `denied`, or `absent`).

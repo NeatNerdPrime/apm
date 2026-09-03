@@ -36,6 +36,14 @@ from scripts.architecture_linter.checks.install_frozen_and_audit import (
     check_mcp_ownership_migration,
     check_uninstall_reachability,
 )
+from scripts.architecture_linter.checks.install_lsp_plugin import (
+    GUARD_EXECUTABLE_TRUST,
+    GUARD_LSP_LIFECYCLE,
+    GUARD_LSP_TARGET_CONTRACT,
+    check_executable_trust_context,
+    check_lsp_lifecycle,
+    check_lsp_target_contract,
+)
 from scripts.architecture_linter.checks.install_package_target_authorization import (
     _GUARD_PACKAGE_TARGET,
     check_package_target_authorization,
@@ -119,6 +127,21 @@ RULES: tuple[Rule, ...] = (
         _GUARD_BASE_INTEGRATOR,
         "File-level deploy/sync/cleanup stays owned by BaseIntegrator.",
         check_base_integrator,
+    ),
+    _rule(
+        GUARD_EXECUTABLE_TRUST,
+        "Install and update consume one effective executable-trust owner.",
+        check_executable_trust_context,
+    ),
+    _rule(
+        GUARD_LSP_TARGET_CONTRACT,
+        "LSP target shape and deployment paths route through LSPIntegrator.",
+        check_lsp_target_contract,
+    ),
+    _rule(
+        GUARD_LSP_LIFECYCLE,
+        "LSP collection and reconciliation route through install/lsp/integration.py.",
+        check_lsp_lifecycle,
     ),
     _rule(
         _GUARD_UNINSTALL_REACHABILITY,

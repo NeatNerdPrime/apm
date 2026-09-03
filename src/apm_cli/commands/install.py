@@ -203,6 +203,8 @@ class InstallContext:
     install_result: InstallResult | None = None
     target_decision: "EffectiveTargetDecision | None" = None
     trust_bin: bool | None = None
+    exec_allow_map: builtins.dict[str, builtins.dict[str, bool]] | None = None
+    exec_allow_resolved: bool = False
 
 
 # APM Dependencies (conditional import for graceful degradation)
@@ -1228,7 +1230,6 @@ def install(  # noqa: C901, PLR0913
             "--frozen and --update are mutually exclusive. "
             "Use 'apm update' to refresh refs, then 'apm install --frozen' in CI."
         )
-    # The root redirect restores cwd in the command's existing finally block.
     if root and global_:
         raise click.UsageError("--root is not valid with --global (user scope)")
     from ..core.install_audit import resolve_audit_override_from_cli
@@ -1243,24 +1244,18 @@ def install(  # noqa: C901, PLR0913
         InstallService.reject_missing_frozen_root(frozen, root)
     except FrozenInstallError as exc:
         raise click.ClickException(str(exc)) from exc
+    _source_root = Path.cwd()
     _root_redirect = install_root_redirect(root, dry_run=dry_run)
     _root_redirect.__enter__()
     try:
-        # Create structured logger for install output early so exception
-        # handlers can always reference it (avoids UnboundLocalError if
-        # scope initialisation below throws).
         is_partial = bool(packages)
         logger = InstallLogger(verbose=verbose, dry_run=dry_run, partial=is_partial)
-
         # Resolve --legacy-skill-paths: CLI flag wins, then env var fallback.
         if not legacy_skill_paths:
             from ..integration.targets import should_use_legacy_skill_paths
 
             legacy_skill_paths = should_use_legacy_skill_paths()
 
-        # ----------------------------------------------------------------
-        # Local bundles bypass dependency resolution and do not mutate apm.yml.
-        # ----------------------------------------------------------------
         if len(packages) == 1 and not mcp_name and (_probe := Path(packages[0])).exists():
             from ..bundle.local_bundle import detect_local_bundle as _detect_lb
 
@@ -1272,12 +1267,17 @@ def install(  # noqa: C901, PLR0913
                 raise click.UsageError(f"Bundle security check failed: {exc}") from exc
             if _bundle_info is not None:
                 enforce_agent_plugin_deployment_boundary(bundle_info=_bundle_info)
+                from ..install.local_bundle_handler import (
+                    effective_bundle_allow_map as _effective_bundle_allow_map,
+                )
                 from ..install.local_bundle_handler import install_local_bundle as _install_lb
 
-                # allowExecutables for bundle install gate.
-                from ..security.executables import read_bundle_allow_executables as _rbae
-
-                _allow_execs_for_bundle = _rbae(Path(root or ".") / "apm.yml", logger)
+                _bundle_project_root = _source_root
+                _allow_execs_for_bundle = _effective_bundle_allow_map(
+                    _bundle_project_root,
+                    no_policy=no_policy,
+                    logger=logger,
+                )
                 _install_lb(
                     bundle_info=_bundle_info,
                     bundle_arg=packages[0],
@@ -1352,11 +1352,9 @@ def install(  # noqa: C901, PLR0913
         if verbose:
             os.environ["APM_VERBOSE"] = "1"
 
-        # ----------------------------------------------------------------
         # --mcp branch (W3): when --mcp is set, route to the dedicated
         # MCP-add path.  We compute the post-`--` argv here BEFORE Click's
         # silent handling: see _split_argv_at_double_dash().
-        # ----------------------------------------------------------------
         _, command_argv = _split_argv_at_double_dash(_get_invocation_argv())
         # `packages` from Click already includes the post-`--` items; the
         # pre-`--` portion is what the user typed as positional packages.
@@ -1918,6 +1916,8 @@ def _install_apm_packages(ctx, outcome):
             apm_count = install_result.installed_count
             apm_diagnostics = install_result.diagnostics
             ctx.target_decision = install_result.target_decision
+            ctx.exec_allow_map = install_result.exec_allow_map
+            ctx.exec_allow_resolved = install_result.exec_allow_resolved
             if install_result.disposition not in {
                 InstallDisposition.SUCCESS,
                 InstallDisposition.PARTIAL_SUCCESS,

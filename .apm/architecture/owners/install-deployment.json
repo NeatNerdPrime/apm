@@ -86,6 +86,27 @@
       "guards": ["install-deployment-base-integrator"]
     },
     {
+      "id": "executable-trust-context",
+      "decision": "Executable trust context and per-package approval",
+      "owner": "security/executables.py (exec_trust_context_for_project, resolve_exec_decision)",
+      "selectors": ["src/apm_cli/security/executables.py"],
+      "guards": ["install-deployment-executable-trust-context"]
+    },
+    {
+      "id": "lsp-target-contract",
+      "decision": "LSP target path, shape, and reserved Claude namespace",
+      "owner": "integration/lsp_integrator.py (LSPIntegrator)",
+      "selectors": ["src/apm_cli/integration/lsp_integrator.py"],
+      "guards": ["install-deployment-lsp-target-contract"]
+    },
+    {
+      "id": "lsp-lifecycle",
+      "decision": "LSP lifecycle orchestration and reconciliation",
+      "owner": "install/lsp/integration.py",
+      "selectors": ["src/apm_cli/install/lsp/integration.py"],
+      "guards": ["install-deployment-lsp-lifecycle"]
+    },
+    {
       "id": "post-uninstall-dependency-reachability",
       "decision": "Post-uninstall dependency reachability",
       "owner": "deps/reachability.py (compute_forward_reachable_keys)",

@@ -6,10 +6,10 @@ runner already proves the registry and the rule catalog agree *by name* and that
 every guard executes exactly once per run.  Names prove nothing about teeth: a
 rule whose body was gutted still registers its guard ID and still runs.
 
-This file supplies the missing half of that contract.  For each of the 58
-registered owner guards it pins one minimal, meaningful source mutation -- a
-surgical edit that kills a load-bearing sub-condition of the owning decision --
-and asserts the one rule that owns that guard reports a real `Violation`.
+This file supplies the missing half of that contract.  For each registered owner
+guard it pins one minimal, meaningful source mutation -- a surgical edit that
+kills a load-bearing sub-condition of the owning decision -- and asserts the one
+rule that owns that guard reports a real `Violation`.
 Coverage is a set equality against the live registry, so a new owner guard that
 lands without a mutation case fails here instead of shipping a toothless rule.
 
@@ -174,20 +174,20 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="An Agent Plugin consumer reimplements the reproducible timestamp fallback.",
     ),
     MutationCase(
-        guard_id="contracts-tooling-root-context-write-eligibility",
-        rule_id="contracts-tooling-root-context-write-eligibility",
-        path="src/apm_cli/compilation/agents_compiler.py",
-        old="and self._hand_authored_root_context_blocks_write(output_file)",
-        new="and False",
-        intent="Single-file compilation bypasses the root overwrite eligibility owner.",
-    ),
-    MutationCase(
         guard_id="contracts-tooling-project-yaml-write-delegation",
         rule_id="contracts-tooling-project-yaml-write-delegation",
         path="src/apm_cli/utils/yaml_io.py",
         old="    atomic_write_text(\n",
         new="    write_text_lf(\n",
         intent="The atomic project YAML writer bypasses the canonical atomic writer.",
+    ),
+    MutationCase(
+        guard_id="contracts-tooling-root-context-write-eligibility",
+        rule_id="contracts-tooling-root-context-write-eligibility",
+        path="src/apm_cli/compilation/agents_compiler.py",
+        old="def _hand_authored_root_context_blocks_write(",
+        new="def _hand_authored_root_context_blocks_write_disabled(",
+        intent="Root context writes lose the canonical hand-authored ownership gate.",
     ),
     MutationCase(
         guard_id="hooks-integrations-copilot-cli-mcp-paths",
@@ -278,6 +278,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="BaseIntegrator drops a mandatory file-level deploy/sync/cleanup method.",
     ),
     MutationCase(
+        guard_id="install-deployment-executable-trust-context",
+        rule_id="install-deployment-executable-trust-context",
+        path="src/apm_cli/security/executables.py",
+        old="def exec_trust_context_for_project(",
+        new="def exec_trust_context_for_project_disabled(",
+        intent="Executable trust loses its canonical project-context resolver.",
+    ),
+    MutationCase(
         guard_id="install-deployment-frozen-mutation-eligibility",
         rule_id="install-deployment-frozen-mutation-eligibility",
         path="src/apm_cli/install/service.py",
@@ -292,6 +300,22 @@ MUTATIONS: tuple[MutationCase, ...] = (
         old="user_scope=is_user_scope(scope)",
         new="user_scope=False",
         intent="Direct MCP target resolution stops consuming the command's scope decision.",
+    ),
+    MutationCase(
+        guard_id="install-deployment-lsp-lifecycle",
+        rule_id="install-deployment-lsp-lifecycle",
+        path="src/apm_cli/install/lsp/integration.py",
+        old="def reconcile_lsp_after_uninstall(",
+        new="def reconcile_lsp_after_uninstall_disabled(",
+        intent="LSP reconciliation loses its canonical lifecycle entry point.",
+    ),
+    MutationCase(
+        guard_id="install-deployment-lsp-target-contract",
+        rule_id="install-deployment-lsp-target-contract",
+        path="src/apm_cli/integration/lsp_integrator.py",
+        old="return BaseIntegrator.resolve_deploy_path(relative_path, project_root)",
+        new="return spec.path(project_root, user_scope=False)",
+        intent="Claude LSP plugin writes bypass the canonical deployment-path gate.",
     ),
     MutationCase(
         guard_id="install-deployment-mcp-ownership-migration",
