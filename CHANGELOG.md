@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `apm install` launched from Git hooks now isolates dependency Git operations
+  from the invoking repository, preventing installs from detaching or mutating
+  the caller's branch. Safe Git URL rewrites remain supported; credential-bearing,
+  insecure, and cross-host network rewrites now fail before network use,
+  and managed credentials stay out of Git URL arguments and stored remotes.
+  (#2759)
 - Windows users no longer get repeated line-ending churn when APM rewrites
   `apm.yml`: install, uninstall, dependency resolution, and revision-pin
   updates now produce deterministic LF output. An `apm.yml` that already uses
