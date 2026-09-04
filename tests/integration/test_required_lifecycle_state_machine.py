@@ -17,6 +17,7 @@ from apm_cli.integration.targets import KNOWN_TARGETS
 from apm_cli.utils.content_hash import compute_package_hash
 from apm_cli.utils.yaml_io import dump_yaml, load_yaml
 from tests.utils.apm_lifecycle_runner import ApmLifecycleRunner, CommandResult
+from tests.utils.artifact_snapshot import ArtifactSnapshot, assert_unchanged
 from tests.utils.isolated_apm_environment import IsolatedApmEnvironment
 from tests.utils.lifecycle_state import LifecycleStateRoot, LifecycleStateSnapshot
 from tests.utils.local_git_repository import (
@@ -182,6 +183,36 @@ def _publish(
         remote_url=remote_url,
         dependency=dependency,
         environment=environment,
+    )
+
+
+def _publish_legacy_plugin(
+    scenario: _Scenario,
+    name: str,
+    *,
+    skill: str,
+) -> _PublishedPackage:
+    package = scenario.sources.create(name)
+    scenario.sources.add_skill(package, skill, _skill(skill))
+    package.manifest_path.unlink()
+    (package.root / "plugin.json").write_text(
+        json.dumps({"name": package.name, "skills": ["./skills/"]}),
+        encoding="ascii",
+    )
+    repository = scenario.repositories.create(package.name, source_tree=package.root)
+    commit = scenario.repositories.commit(repository, message="publish legacy plugin")
+    remote_url = f"https://github.com/{_OWNER}/{package.name}"
+    return _PublishedPackage(
+        package=package,
+        repository=repository,
+        commit=commit,
+        remote_url=remote_url,
+        dependency={
+            "git": remote_url,
+            "ref": commit.sha,
+            "alias": package.name,
+        },
+        environment=scenario.repositories.url_rewrite_subprocess_env(repository, remote_url),
     )
 
 
@@ -1002,28 +1033,12 @@ def test_required_legacy_content_hash_upgrade_preserves_skills_and_converges(
 ) -> None:
     """Upgrade a receipt-less 0.28 plugin without dropping prior skill claims."""
     scenario = _new_scenario(tmp_path / "legacy-content-hash", apm_binary_path)
-    package = scenario.sources.create("legacy-hash-kit")
-    scenario.sources.add_skill(package, "legacy-hash", _skill("legacy-hash"))
-    package.manifest_path.unlink()
-    (package.root / "plugin.json").write_text(
-        json.dumps({"name": package.name, "skills": ["./skills/"]}),
-        encoding="ascii",
+    source = _publish_legacy_plugin(
+        scenario,
+        "legacy-hash-kit",
+        skill="legacy-hash",
     )
-    repository = scenario.repositories.create(package.name, source_tree=package.root)
-    commit = scenario.repositories.commit(repository, message="publish legacy plugin")
-    remote_url = f"https://github.com/{_OWNER}/{package.name}"
-    source = _PublishedPackage(
-        package=package,
-        repository=repository,
-        commit=commit,
-        remote_url=remote_url,
-        dependency={
-            "git": remote_url,
-            "ref": commit.sha,
-            "alias": package.name,
-        },
-        environment=scenario.repositories.url_rewrite_subprocess_env(repository, remote_url),
-    )
+    package = source.package
     consumer = scenario.consumers.create(
         "legacy-hash-consumer",
         dependencies=(source.dependency,),
@@ -1120,6 +1135,64 @@ def test_required_legacy_content_hash_upgrade_preserves_skills_and_converges(
     converged = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
 
     _assert_same_state(upgraded, converged)
+
+
+def test_required_invalid_legacy_plugin_cache_fails_with_recovery(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """A verified but invalid 0.28 plugin cache fails with actionable identity."""
+    scenario = _new_scenario(tmp_path / "invalid-legacy-plugin", apm_binary_path)
+    source = _publish_legacy_plugin(
+        scenario,
+        "invalid-legacy-plugin-kit",
+        skill="legacy-skill",
+    )
+    consumer = scenario.consumers.create(
+        "invalid-legacy-plugin-consumer",
+        dependencies=(source.dependency,),
+        targets=("claude", "codex"),
+    )
+    _run_success(
+        scenario,
+        consumer,
+        _INSTALL_ARGS,
+        environment=source.environment,
+        scenario_id="invalid-legacy-plugin-establish",
+    )
+
+    cached_package = consumer.root / "apm_modules" / source.package.name
+    receipt = cached_package / ".apm" / ".plugin-skill-sources.json"
+    assert receipt.is_file()
+    receipt.unlink()
+    (cached_package / "plugin.json").write_text(
+        json.dumps({"name": source.package.name, "skills": ["./missing-skills/"]}),
+        encoding="ascii",
+    )
+    lock_path = consumer.root / "apm.lock.yaml"
+    lock_document = load_yaml(lock_path)
+    locked_dependency = lock_document["dependencies"][0]
+    lock_document["apm_version"] = "0.28.0"
+    locked_dependency["content_hash"] = compute_package_hash(cached_package)
+    dump_yaml(lock_document, lock_path)
+    invalid_cache = ArtifactSnapshot.capture(cached_package)
+
+    result = scenario.runner.run(
+        _INSTALL_ARGS,
+        scenario_id="invalid-legacy-plugin-reinstall",
+        cwd=consumer.root,
+        env=source.environment,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0, _result_evidence(result)
+    assert source.package.name in output
+    assert str(cached_package) in "".join(output.split())
+    assert "apm deps clean --yes" in output
+    assert_unchanged(invalid_cache, ArtifactSnapshot.capture(cached_package))
+    assert not receipt.exists()
+    assert (consumer.root / ".claude/skills/legacy-skill/SKILL.md").is_file()
+    assert (consumer.root / ".agents/skills/legacy-skill/SKILL.md").is_file()
 
 
 def test_required_dependency_prune_then_uninstall_cascades_owned_state(

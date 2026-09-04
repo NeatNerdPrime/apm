@@ -157,7 +157,40 @@ class TestResolveDownloadStrategy:
             )
 
         assert not skip_download
+        assert "org/pkg" not in ctx.content_hash_verified_deps
         logger.progress.assert_called()
+
+    def test_content_hash_match_records_verification_for_cached_source(
+        self, tmp_path: Path
+    ) -> None:
+        """A successful final cache check must be visible to cached consumers."""
+        from apm_cli.install.phases.integrate import _resolve_download_strategy
+
+        ctx = _make_ctx(tmp_path)
+        locked_dep = MagicMock()
+        locked_dep.resolved_commit = "locked-sha"
+        locked_dep.content_hash = "deadbeef"
+        locked_dep.registry_prefix = None
+        lockfile = MagicMock()
+        lockfile.get_dependency.return_value = locked_dep
+        ctx.existing_lockfile = lockfile
+        install_path = tmp_path / "pkg"
+        install_path.mkdir()
+        local_repo = MagicMock()
+        local_repo.head.commit.hexsha = "locked-sha"
+
+        with (
+            patch("apm_cli.drift.detect_ref_change", return_value=False),
+            patch("apm_cli.install.phases.heal.run_heal_chain", return_value=(False, False)),
+            patch("git.Repo", return_value=local_repo),
+            patch("apm_cli.utils.content_hash.verify_package_hash", return_value=True),
+        ):
+            _resolved_ref, skip_download, _locked, _changed = _resolve_download_strategy(
+                ctx, _make_dep_ref(), install_path
+            )
+
+        assert skip_download
+        assert "org/pkg" in ctx.content_hash_verified_deps
 
     def test_registry_enforce_only_skips_cached(self, tmp_path: Path) -> None:
         from apm_cli.install.phases.integrate import _resolve_download_strategy

@@ -63,6 +63,7 @@ def _make_ctx(
     registry_config: Any = None,
     auth_resolver: Any = None,
     expected_hash_change_deps: set[str] | None = None,
+    content_hash_verified_deps: set[str] | None = None,
 ) -> MagicMock:
     """Build a minimal InstallContext-shaped MagicMock."""
     ctx = MagicMock()
@@ -77,6 +78,7 @@ def _make_ctx(
     ctx.registry_config = registry_config
     ctx.auth_resolver = auth_resolver
     ctx.expected_hash_change_deps = expected_hash_change_deps or set()
+    ctx.content_hash_verified_deps = content_hash_verified_deps or set()
     ctx.installed_packages = []
     ctx.package_hashes = {}
     ctx.package_types = {}
@@ -586,35 +588,171 @@ class TestCachedDependencySourceAcquire:
         assert not (install_path / "apm.yml").exists()
 
     def test_receiptless_plugin_error_identifies_cache_and_recovery(self, tmp_path: Path) -> None:
-        """Invalid legacy caches name the dependency, path, and recovery action."""
+        """Cached acquisition names invalid legacy state and its recovery action."""
+        from apm_cli.deps.lockfile import LockedDependency
         from apm_cli.install.errors import DirectDependencyError
-        from apm_cli.install.legacy_plugin_compat import upgrade_cached_legacy_plugin
 
         install_path = tmp_path / "cached-plugin"
-        install_path.mkdir()
-        (install_path / "apm.yml").write_text("name: cached-plugin\n", encoding="ascii")
-        invalid = MagicMock(is_valid=False, package=None, errors=["invalid metadata"])
-        evidence = MagicMock(
-            has_plugin_manifest=True, plugin_json_path=install_path / "plugin.json"
+        skill = install_path / "skills" / "valid"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# valid\n", encoding="ascii")
+        (install_path / ".apm" / "skills" / "valid").mkdir(parents=True)
+        (install_path / ".apm" / "skills" / "valid" / "SKILL.md").write_text(
+            "# valid\n", encoding="ascii"
+        )
+        (install_path / "apm.yml").write_text(
+            "name: cached-plugin\nversion: 0.1.0\n", encoding="ascii"
+        )
+        (install_path / "plugin.json").write_text(
+            '{"name":"cached-plugin","skills":["./missing-skills/"]}',
+            encoding="ascii",
+        )
+        locked_dep = LockedDependency(
+            repo_url="owner/cached-plugin",
+            package_type="marketplace_plugin",
+            content_hash="sha256:verified",
+        )
+        existing_lockfile = MagicMock(apm_version="0.28.0")
+        ctx = _make_ctx(
+            targets=["claude"],
+            existing_lockfile=existing_lockfile,
+            content_hash_verified_deps={"owner/cached-plugin"},
+        )
+        source = self._make_source(
+            ctx,
+            _make_dep_ref(repo_url="owner/cached-plugin"),
+            install_path,
+            dep_key="owner/cached-plugin",
+            dep_locked_chk=locked_dep,
         )
 
-        with (
-            patch(
-                "apm_cli.install.legacy_plugin_compat.gather_detection_evidence",
-                return_value=evidence,
-            ),
-            patch(
-                "apm_cli.install.legacy_plugin_compat.validate_legacy_marketplace_plugin",
-                return_value=invalid,
-            ),
-        ):
-            with pytest.raises(DirectDependencyError) as exc_info:
-                upgrade_cached_legacy_plugin(install_path, "owner/cached-plugin")
+        with pytest.raises(DirectDependencyError) as exc_info:
+            source.acquire()
 
         message = str(exc_info.value)
         assert "owner/cached-plugin" in message
         assert str(install_path) in message
         assert "apm deps clean --yes" in message
+
+    @pytest.mark.parametrize(
+        (
+            "apm_version",
+            "package_type",
+            "content_hash",
+            "hash_verified",
+            "fetched_this_run",
+        ),
+        [
+            ("0.29.0", "marketplace_plugin", "sha256:locked", True, False),
+            ("0.28.0", "apm_package", "sha256:locked", True, False),
+            ("0.28.0", "marketplace_plugin", "sha256:locked", False, False),
+            ("0.28.0", "marketplace_plugin", "sha256:locked", True, True),
+            ("0.28.0", "marketplace_plugin", None, False, False),
+        ],
+    )
+    def test_receiptless_plugin_upgrade_requires_verified_legacy_lock(
+        self,
+        tmp_path: Path,
+        apm_version: str,
+        package_type: str,
+        content_hash: str | None,
+        hash_verified: bool,
+        fetched_this_run: bool,
+    ) -> None:
+        """Only verified, previously locked 0.28 plugin caches may be repaired."""
+        from apm_cli.deps.lockfile import LockedDependency
+
+        install_path = tmp_path / "cached-plugin"
+        (install_path / ".apm").mkdir(parents=True)
+        (install_path / "apm.yml").write_text(
+            "name: cached-plugin\nversion: 0.1.0\n", encoding="ascii"
+        )
+        (install_path / "plugin.json").write_text('{"name":"cached-plugin"}', encoding="ascii")
+        locked_dep = LockedDependency(
+            repo_url="owner/cached-plugin",
+            package_type=package_type,
+            content_hash=content_hash,
+        )
+        existing_lockfile = MagicMock(apm_version=apm_version)
+        verified = {"owner/cached-plugin"} if hash_verified else set()
+        ctx = _make_ctx(
+            existing_lockfile=existing_lockfile,
+            content_hash_verified_deps=verified,
+        )
+        cached_package = MagicMock(source="owner/cached-plugin")
+
+        with (
+            patch(
+                "apm_cli.install.legacy_plugin_compat.validate_legacy_marketplace_plugin"
+            ) as validate,
+            patch(
+                "apm_cli.models.apm_package.APMPackage.from_apm_yml",
+                return_value=cached_package,
+            ),
+        ):
+            source = self._make_source(
+                ctx,
+                _make_dep_ref(repo_url="owner/cached-plugin"),
+                install_path,
+                dep_key="owner/cached-plugin",
+                dep_locked_chk=locked_dep,
+                fetched_this_run=fetched_this_run,
+            )
+            result = source.acquire()
+
+        assert result is not None
+        validate.assert_not_called()
+
+    def test_acquire_hands_fetched_state_to_legacy_upgrade(self, tmp_path: Path) -> None:
+        """Cached acquisition explicitly excludes bytes fetched in this run."""
+        from apm_cli.deps.lockfile import LockedDependency
+
+        install_path = tmp_path / "cached-plugin"
+        install_path.mkdir()
+        (install_path / "apm.yml").write_text(
+            "name: cached-plugin\nversion: 0.1.0\n", encoding="ascii"
+        )
+        locked_dep = LockedDependency(
+            repo_url="owner/cached-plugin",
+            package_type="marketplace_plugin",
+            content_hash="sha256:locked",
+        )
+        existing_lockfile = MagicMock(apm_version="0.28.0")
+        ctx = _make_ctx(
+            existing_lockfile=existing_lockfile,
+            content_hash_verified_deps={"owner/cached-plugin"},
+        )
+        cached_package = MagicMock(source="owner/cached-plugin")
+
+        with (
+            patch(
+                "apm_cli.install.legacy_plugin_compat.upgrade_cached_legacy_plugin",
+                return_value=None,
+            ) as upgrade,
+            patch(
+                "apm_cli.models.apm_package.APMPackage.from_apm_yml",
+                return_value=cached_package,
+            ),
+        ):
+            source = self._make_source(
+                ctx,
+                _make_dep_ref(repo_url="owner/cached-plugin"),
+                install_path,
+                dep_key="owner/cached-plugin",
+                dep_locked_chk=locked_dep,
+                fetched_this_run=True,
+            )
+            result = source.acquire()
+
+        assert result is not None
+        upgrade.assert_called_once_with(
+            install_path,
+            "owner/cached-plugin",
+            locked_dependency=locked_dep,
+            lockfile_apm_version="0.28.0",
+            content_hash_verified=True,
+            fetched_this_run=True,
+        )
 
     def test_with_targets_and_apm_yml(self, tmp_path: Path) -> None:
         """Happy path: apm.yml present → full Materialization returned."""
