@@ -426,6 +426,19 @@ class TestResolveCachedCommit:
         result = source._resolve_cached_commit()
         assert result == "resolved_sha_abc"
 
+    def test_pre_downloaded_package_uses_materialized_commit(self) -> None:
+        """Parallel pre-download identity wins over a mutable manifest ref."""
+        ctx = _make_ctx(callback_downloaded={})
+        package_info = MagicMock()
+        package_info.resolved_reference.resolved_commit = "pre_downloaded_sha"
+        ctx.pre_download_results = {"owner/repo": package_info}
+        dep_ref = _make_dep_ref(reference="main")
+        source = self._make_source(ctx, dep_ref, fetched_this_run=True)
+
+        result = source._resolve_cached_commit()
+
+        assert result == "pre_downloaded_sha"
+
     def test_fetched_this_run_resolved_commit_is_cached_sentinel(self) -> None:
         """fetched_this_run=True, resolved_commit == 'cached' → falls back to dep_ref.reference."""
         ctx = _make_ctx(callback_downloaded={})
@@ -589,8 +602,9 @@ class TestCachedDependencySourceAcquire:
 
     def test_receiptless_plugin_error_identifies_cache_and_recovery(self, tmp_path: Path) -> None:
         """Cached acquisition names invalid legacy state and its recovery action."""
-        from apm_cli.deps.lockfile import LockedDependency
+        from apm_cli.deps.lockfile import LockedDependency, LockFile
         from apm_cli.install.errors import DirectDependencyError
+        from apm_cli.utils.content_hash import compute_package_hash
 
         install_path = tmp_path / "cached-plugin"
         skill = install_path / "skills" / "valid"
@@ -610,13 +624,13 @@ class TestCachedDependencySourceAcquire:
         locked_dep = LockedDependency(
             repo_url="owner/cached-plugin",
             package_type="marketplace_plugin",
-            content_hash="sha256:verified",
+            content_hash=compute_package_hash(install_path),
         )
-        existing_lockfile = MagicMock(apm_version="0.28.0")
+        existing_lockfile = LockFile(apm_version="0.28.0")
+        existing_lockfile.add_dependency(locked_dep)
         ctx = _make_ctx(
             targets=["claude"],
             existing_lockfile=existing_lockfile,
-            content_hash_verified_deps={"owner/cached-plugin"},
         )
         source = self._make_source(
             ctx,
@@ -635,19 +649,11 @@ class TestCachedDependencySourceAcquire:
         assert "apm deps clean --yes" in message
 
     @pytest.mark.parametrize(
-        (
-            "apm_version",
-            "package_type",
-            "content_hash",
-            "hash_verified",
-            "fetched_this_run",
-        ),
+        ("apm_version", "package_type", "fetched_this_run"),
         [
-            ("0.29.0", "marketplace_plugin", "sha256:locked", True, False),
-            ("0.28.0", "apm_package", "sha256:locked", True, False),
-            ("0.28.0", "marketplace_plugin", "sha256:locked", False, False),
-            ("0.28.0", "marketplace_plugin", "sha256:locked", True, True),
-            ("0.28.0", "marketplace_plugin", None, False, False),
+            ("0.29.0", "marketplace_plugin", False),
+            ("0.28.0", "apm_package", False),
+            ("0.28.0", "marketplace_plugin", True),
         ],
     )
     def test_receiptless_plugin_upgrade_requires_verified_legacy_lock(
@@ -655,12 +661,11 @@ class TestCachedDependencySourceAcquire:
         tmp_path: Path,
         apm_version: str,
         package_type: str,
-        content_hash: str | None,
-        hash_verified: bool,
         fetched_this_run: bool,
     ) -> None:
         """Only verified, previously locked 0.28 plugin caches may be repaired."""
-        from apm_cli.deps.lockfile import LockedDependency
+        from apm_cli.deps.lockfile import LockedDependency, LockFile
+        from apm_cli.utils.content_hash import compute_package_hash
 
         install_path = tmp_path / "cached-plugin"
         (install_path / ".apm").mkdir(parents=True)
@@ -671,14 +676,11 @@ class TestCachedDependencySourceAcquire:
         locked_dep = LockedDependency(
             repo_url="owner/cached-plugin",
             package_type=package_type,
-            content_hash=content_hash,
+            content_hash=compute_package_hash(install_path),
         )
-        existing_lockfile = MagicMock(apm_version=apm_version)
-        verified = {"owner/cached-plugin"} if hash_verified else set()
-        ctx = _make_ctx(
-            existing_lockfile=existing_lockfile,
-            content_hash_verified_deps=verified,
-        )
+        existing_lockfile = LockFile(apm_version=apm_version)
+        existing_lockfile.add_dependency(locked_dep)
+        ctx = _make_ctx(existing_lockfile=existing_lockfile)
         cached_package = MagicMock(source="owner/cached-plugin")
 
         with (
@@ -718,10 +720,8 @@ class TestCachedDependencySourceAcquire:
             content_hash="sha256:locked",
         )
         existing_lockfile = MagicMock(apm_version="0.28.0")
-        ctx = _make_ctx(
-            existing_lockfile=existing_lockfile,
-            content_hash_verified_deps={"owner/cached-plugin"},
-        )
+        existing_lockfile.get_dependency.return_value = locked_dep
+        ctx = _make_ctx(existing_lockfile=existing_lockfile)
         cached_package = MagicMock(source="owner/cached-plugin")
 
         with (
@@ -748,9 +748,7 @@ class TestCachedDependencySourceAcquire:
         upgrade.assert_called_once_with(
             install_path,
             "owner/cached-plugin",
-            locked_dependency=locked_dep,
-            lockfile_apm_version="0.28.0",
-            content_hash_verified=True,
+            lockfile=existing_lockfile,
             fetched_this_run=True,
         )
 

@@ -19,9 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `apm install` now upgrades APM 0.28 marketplace-plugin skill metadata before
-  stale cleanup, preserving prior Claude and Codex deployments instead of
-  deleting them. (fixes #2744) (#2787)
+- `apm install` now performs a hash-verified cached APM 0.28
+  marketplace-plugin upgrade before stale cleanup, preserving prior Claude and
+  Codex deployments instead of deleting them. (fixes #2744) (#2787)
 - Windows users no longer get repeated line-ending churn when APM rewrites
   `apm.yml`: install, uninstall, dependency resolution, and revision-pin
   updates now produce deterministic LF output. An `apm.yml` that already uses

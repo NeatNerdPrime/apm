@@ -398,6 +398,15 @@ class CachedDependencySource(DependencySource):
         cached_commit: str | None = None
         if self.fetched_this_run:
             cached_commit = ctx.callback_downloaded.get(dep_key)
+            if not cached_commit:
+                pre_downloaded = ctx.pre_download_results.get(dep_key)
+                pre_downloaded_ref = getattr(pre_downloaded, "resolved_reference", None)
+                if (
+                    pre_downloaded_ref
+                    and pre_downloaded_ref.resolved_commit
+                    and pre_downloaded_ref.resolved_commit != "cached"
+                ):
+                    cached_commit = pre_downloaded_ref.resolved_commit
             if (
                 not cached_commit
                 and resolved_ref
@@ -423,7 +432,10 @@ class CachedDependencySource(DependencySource):
         from apm_cli.bundle.local_bundle import route_agent_plugin_package
         from apm_cli.constants import APM_YML_FILENAME
         from apm_cli.deps.installed_package import InstalledPackage
-        from apm_cli.install.legacy_plugin_compat import upgrade_cached_legacy_plugin
+        from apm_cli.install.legacy_plugin_compat import (
+            preserve_normalized_marketplace_plugin_type,
+            upgrade_cached_legacy_plugin,
+        )
         from apm_cli.models.apm_package import (
             APMPackage,
             GitReferenceType,
@@ -516,16 +528,20 @@ class CachedDependencySource(DependencySource):
         else:
             apm_yml_path = install_path / APM_YML_FILENAME
             pkg_type, _ = detect_package_type(install_path)
+            pkg_type = preserve_normalized_marketplace_plugin_type(
+                install_path,
+                dep_locked_chk,
+                pkg_type,
+            )
             upgraded_plugin = upgrade_cached_legacy_plugin(
                 install_path,
                 dep_key,
-                locked_dependency=dep_locked_chk,
-                lockfile_apm_version=getattr(ctx.existing_lockfile, "apm_version", None),
-                content_hash_verified=dep_key in ctx.content_hash_verified_deps,
+                lockfile=ctx.existing_lockfile,
                 fetched_this_run=self.fetched_this_run,
             )
             if upgraded_plugin is not None:
                 cached_package = upgraded_plugin
+                pkg_type = PackageType.MARKETPLACE_PLUGIN
             elif apm_yml_path.exists():
                 cached_package = APMPackage.from_apm_yml(
                     apm_yml_path,
@@ -893,14 +909,24 @@ class FreshDependencySource(DependencySource):
             ):
                 _fresh_hash = ctx.package_hashes[dep_key]
                 if _fresh_hash != dep_locked_chk.content_hash:
-                    safe_rmtree(install_path, ctx.apm_modules_dir)
-                    raise DirectDependencyError(
-                        f"Content hash mismatch for {dep_key}: "
-                        f"expected {dep_locked_chk.content_hash}, got {_fresh_hash}. "
-                        "The downloaded content differs from the lockfile record. "
-                        "This may indicate a supply-chain attack. Use "
-                        "'apm install --update' to accept new content and update the lockfile."
+                    from apm_cli.install.legacy_plugin_compat import (
+                        matches_fresh_legacy_plugin_hash,
                     )
+
+                    if not matches_fresh_legacy_plugin_hash(
+                        install_path,
+                        dep_key,
+                        lockfile=ctx.existing_lockfile,
+                        package_type=getattr(package_info, "package_type", None),
+                    ):
+                        safe_rmtree(install_path, ctx.apm_modules_dir)
+                        raise DirectDependencyError(
+                            f"Content hash mismatch for {dep_key}: "
+                            f"expected {dep_locked_chk.content_hash}, got {_fresh_hash}. "
+                            "The downloaded content differs from the lockfile record. "
+                            "This may indicate a supply-chain attack. Use "
+                            "'apm install --update' to accept new content and update the lockfile."
+                        )
 
             if hasattr(package_info, "package_type") and package_info.package_type:
                 ctx.package_types[dep_key] = package_info.package_type.value

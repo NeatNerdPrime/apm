@@ -39,6 +39,7 @@ _OWNER = "apm-fixture-org"
 _AUDIT_ARGS = ("audit", "--ci", "--no-policy", "--format", "json")
 _AUDIT_ALL_ARGS = ("audit", "--ci", "--no-policy", "--no-fail-fast", "--format", "json")
 _INSTALL_ARGS = ("install", "--no-policy", "--parallel-downloads", "0")
+_PARALLEL_INSTALL_ARGS = ("install", "--no-policy", "--parallel-downloads", "2")
 _LOCK_ARGS = ("lock", "--no-policy", "--parallel-downloads", "0")
 _EXTERNAL_USER_ROOT_ENV = {
     "claude": "CLAUDE_CONFIG_DIR",
@@ -1083,6 +1084,7 @@ def test_required_legacy_content_hash_upgrade_preserves_skills_and_converges(
     assert legacy_content_hash != current_content_hash
     lock_document["apm_version"] = "0.28.0"
     locked_dependency["content_hash"] = legacy_content_hash
+    locked_dependency["package_type"] = "marketplace_plugin"
     dump_yaml(lock_document, lock_path)
 
     legacy = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
@@ -1117,6 +1119,7 @@ def test_required_legacy_content_hash_upgrade_preserves_skills_and_converges(
         == installed.file(".agents/skills/legacy-hash/SKILL.md").content
     )
     assert upgraded_dependency.content_hash == current_content_hash
+    assert upgraded_dependency.package_type == "marketplace_plugin"
     assert upgraded_dependency.deployed_files == prior_deployed_files
     assert upgraded_dependency.deployed_file_hashes == prior_deployed_hashes
     assert upgraded.deployment_records == legacy.deployment_records
@@ -1137,12 +1140,93 @@ def test_required_legacy_content_hash_upgrade_preserves_skills_and_converges(
     _assert_same_state(upgraded, converged)
 
 
-def test_required_invalid_legacy_plugin_cache_fails_with_recovery(
+def test_required_parallel_fresh_fetch_bypasses_legacy_cache_upgrade(
     tmp_path: Path,
     apm_binary_path: Path,
 ) -> None:
-    """A verified but invalid 0.28 plugin cache fails with actionable identity."""
-    scenario = _new_scenario(tmp_path / "invalid-legacy-plugin", apm_binary_path)
+    """Fresh parallel downloads never enter the cached 0.28 compatibility path."""
+    scenario = _new_scenario(tmp_path / "parallel-fresh-plugin", apm_binary_path)
+    source = _publish_legacy_plugin(
+        scenario,
+        "parallel-fresh-plugin-kit",
+        skill="parallel-fresh",
+    )
+    branch_dependency = dict(source.dependency)
+    branch_dependency["ref"] = "main"
+    consumer = scenario.consumers.create(
+        "parallel-fresh-plugin-consumer",
+        dependencies=(branch_dependency,),
+        targets=("claude", "codex"),
+    )
+    _run_success(
+        scenario,
+        consumer,
+        _INSTALL_ARGS,
+        environment=source.environment,
+        scenario_id="parallel-fresh-plugin-establish",
+    )
+
+    cached_package = consumer.root / "apm_modules" / source.package.name
+    lock_path = consumer.root / "apm.lock.yaml"
+    lock_document = load_yaml(lock_path)
+    locked_dependency = lock_document["dependencies"][0]
+    receipt = cached_package / ".apm" / ".plugin-skill-sources.json"
+    assert receipt.is_file()
+    receipt.unlink()
+    legacy_content_hash = compute_package_hash(cached_package)
+    lock_document["apm_version"] = "0.28.0"
+    locked_dependency["package_type"] = "marketplace_plugin"
+    locked_dependency["content_hash"] = legacy_content_hash
+    dump_yaml(lock_document, lock_path)
+    shutil.rmtree(cached_package)
+
+    _run_success(
+        scenario,
+        consumer,
+        _PARALLEL_INSTALL_ARGS,
+        environment=source.environment,
+        scenario_id="parallel-fresh-plugin-redownload",
+    )
+    refreshed = LifecycleStateSnapshot.capture(consumer.root, targets=("claude", "codex"))
+    _, refreshed_dependency = _single_locked_dependency(consumer.root)
+    assert refreshed.file(".claude/skills/parallel-fresh/SKILL.md").kind == "file"
+    assert refreshed.file(".agents/skills/parallel-fresh/SKILL.md").kind == "file"
+    assert refreshed_dependency.package_type == "marketplace_plugin"
+    assert refreshed_dependency.resolved_commit == source.commit.sha
+
+    _run_success(
+        scenario,
+        consumer,
+        _PARALLEL_INSTALL_ARGS,
+        environment=source.environment,
+        scenario_id="parallel-fresh-plugin-convergence",
+    )
+    converged = LifecycleStateSnapshot.capture(consumer.root, targets=("claude", "codex"))
+    _assert_same_state(refreshed, converged)
+
+
+@pytest.mark.parametrize(
+    "invalid_cache",
+    (
+        "plugin-path",
+        "missing-hash",
+        "missing-apm-yml",
+        "missing-apm-dir",
+        "apm-yml-symlink",
+        "apm-dir-symlink",
+        "package-root-symlink",
+    ),
+)
+def test_required_invalid_receiptless_legacy_cache_fails_with_recovery(
+    tmp_path: Path,
+    apm_binary_path: Path,
+    invalid_cache: str,
+) -> None:
+    """Reject invalid 0.28 cache state without mutating cache or deployments."""
+    scenario = _new_scenario(
+        tmp_path / f"invalid-legacy-cache-{invalid_cache}",
+        apm_binary_path,
+    )
     source = _publish_legacy_plugin(
         scenario,
         "invalid-legacy-plugin-kit",
@@ -1165,34 +1249,101 @@ def test_required_invalid_legacy_plugin_cache_fails_with_recovery(
     receipt = cached_package / ".apm" / ".plugin-skill-sources.json"
     assert receipt.is_file()
     receipt.unlink()
-    (cached_package / "plugin.json").write_text(
-        json.dumps({"name": source.package.name, "skills": ["./missing-skills/"]}),
-        encoding="ascii",
-    )
     lock_path = consumer.root / "apm.lock.yaml"
     lock_document = load_yaml(lock_path)
     locked_dependency = lock_document["dependencies"][0]
     lock_document["apm_version"] = "0.28.0"
-    locked_dependency["content_hash"] = compute_package_hash(cached_package)
+    locked_dependency["package_type"] = "marketplace_plugin"
+
+    external_root: Path | None = None
+    if invalid_cache == "plugin-path":
+        external_root = cached_package.parent / "outside"
+        external_root.mkdir()
+        (external_root / "sentinel.txt").write_text("outside cache\n", encoding="ascii")
+        (cached_package / "plugin.json").write_text(
+            json.dumps({"name": source.package.name, "skills": ["../outside/"]}),
+            encoding="ascii",
+        )
+    elif invalid_cache == "missing-apm-yml":
+        (cached_package / "apm.yml").unlink()
+    elif invalid_cache == "missing-apm-dir":
+        shutil.rmtree(cached_package / ".apm")
+    elif invalid_cache == "apm-yml-symlink":
+        external_root = tmp_path / "external-apm-yml"
+        external_root.mkdir()
+        external_apm_yml = external_root / "apm.yml"
+        (cached_package / "apm.yml").rename(external_apm_yml)
+        try:
+            (cached_package / "apm.yml").symlink_to(external_apm_yml)
+        except OSError:
+            pytest.skip("Symlinks not supported on this platform")
+    elif invalid_cache == "apm-dir-symlink":
+        external_root = tmp_path / "external-apm-dir"
+        external_root.mkdir()
+        external_apm_dir = external_root / ".apm"
+        (cached_package / ".apm").rename(external_apm_dir)
+        (external_apm_dir / "sentinel.txt").write_text("outside cache\n", encoding="ascii")
+        try:
+            (cached_package / ".apm").symlink_to(
+                external_apm_dir,
+                target_is_directory=True,
+            )
+        except OSError:
+            pytest.skip("Symlinks not supported on this platform")
+    elif invalid_cache == "package-root-symlink":
+        external_root = tmp_path / "external-package"
+        cached_package.rename(external_root)
+        try:
+            cached_package.symlink_to(external_root, target_is_directory=True)
+        except OSError:
+            pytest.skip("Symlinks not supported on this platform")
+
+    if invalid_cache == "missing-hash":
+        locked_dependency.pop("content_hash", None)
+    elif invalid_cache == "package-root-symlink":
+        locked_dependency["content_hash"] = compute_package_hash(external_root)
+    else:
+        locked_dependency["content_hash"] = compute_package_hash(cached_package)
     dump_yaml(lock_document, lock_path)
-    invalid_cache = ArtifactSnapshot.capture(cached_package)
+
+    before_state = LifecycleStateSnapshot.capture(consumer.root, targets=("claude", "codex"))
+    before_cache = ArtifactSnapshot.capture(cached_package)
+    before_external = ArtifactSnapshot.capture(external_root) if external_root is not None else None
+    package_link_target = (
+        cached_package.readlink() if invalid_cache == "package-root-symlink" else None
+    )
 
     result = scenario.runner.run(
         _INSTALL_ARGS,
-        scenario_id="invalid-legacy-plugin-reinstall",
+        scenario_id=f"invalid-legacy-plugin-{invalid_cache}",
         cwd=consumer.root,
         env=source.environment,
     )
-    output = result.stdout + result.stderr
+    output = " ".join((result.stdout + result.stderr).split())
 
     assert result.returncode != 0, _result_evidence(result)
     assert source.package.name in output
     assert str(cached_package) in "".join(output.split())
     assert "apm deps clean --yes" in output
-    assert_unchanged(invalid_cache, ArtifactSnapshot.capture(cached_package))
-    assert not receipt.exists()
-    assert (consumer.root / ".claude/skills/legacy-skill/SKILL.md").is_file()
-    assert (consumer.root / ".agents/skills/legacy-skill/SKILL.md").is_file()
+    if invalid_cache == "plugin-path":
+        assert "is invalid" in output
+    elif invalid_cache == "missing-hash":
+        assert "no content hash" in output
+    elif invalid_cache == "missing-apm-yml":
+        assert "required apm.yml is missing" in output
+    elif invalid_cache == "missing-apm-dir":
+        assert "required .apm directory is missing" in output
+    else:
+        assert "cache metadata contains a symlink" in output
+
+    if package_link_target is not None:
+        assert cached_package.is_symlink()
+        assert cached_package.readlink() == package_link_target
+    assert_unchanged(before_cache, ArtifactSnapshot.capture(cached_package))
+    if before_external is not None and external_root is not None:
+        assert_unchanged(before_external, ArtifactSnapshot.capture(external_root))
+    after_state = LifecycleStateSnapshot.capture(consumer.root, targets=("claude", "codex"))
+    _assert_same_state(before_state, after_state)
 
 
 def test_required_dependency_prune_then_uninstall_cascades_owned_state(
