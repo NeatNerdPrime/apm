@@ -796,6 +796,7 @@ def integrate_local_bundle(
     alias: str | None = None,
     allow_executables: builtins.dict[str, builtins.dict[str, bool]] | None = None,
     approval_key: str | None = None,
+    create_config: bool = True,
 ) -> dict:
     """Integrate a detected local bundle into project / user scope.
 
@@ -827,6 +828,7 @@ def integrate_local_bundle(
         alias: Slug override from ``--as``.
         allow_executables: Effective executable approvals, or ``None`` when disabled.
         approval_key: Exact local-bundle content identity for executable approval.
+        create_config: Whether config reads may create the user config file.
 
     Returns:
         Dict with keys ``deployed_files`` (list[str]),
@@ -919,7 +921,7 @@ def integrate_local_bundle(
     from ..core.experimental import is_enabled
     from ..integration.canvas_integrator import is_canvas_bundle_path
 
-    _canvas_enabled = is_enabled("canvas")
+    _canvas_enabled = is_enabled("canvas", create_config=create_config)
     if _canvas_enabled:
         from ..security.executables import EXEC_TYPE_CANVAS, is_package_approved
 
