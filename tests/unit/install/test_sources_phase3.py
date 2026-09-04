@@ -587,15 +587,37 @@ class TestCachedDependencySourceAcquire:
 
     def test_receiptless_plugin_error_identifies_cache_and_recovery(self, tmp_path: Path) -> None:
         """Invalid legacy caches name the dependency, path, and recovery action."""
+        from apm_cli.deps.lockfile import LockedDependency, LockFile
         from apm_cli.install.errors import DirectDependencyError
-        from apm_cli.install.legacy_plugin_compat import upgrade_cached_legacy_plugin
+        from apm_cli.utils.content_hash import compute_package_hash
 
         install_path = tmp_path / "cached-plugin"
         install_path.mkdir()
         (install_path / "apm.yml").write_text("name: cached-plugin\n", encoding="ascii")
+        (install_path / ".apm").mkdir()
+        (install_path / "plugin.json").write_text('{"name": "cached-plugin"}', encoding="ascii")
         invalid = MagicMock(is_valid=False, package=None, errors=["invalid metadata"])
         evidence = MagicMock(
             has_plugin_manifest=True, plugin_json_path=install_path / "plugin.json"
+        )
+        locked_dependency = LockedDependency(
+            repo_url="owner/cached-plugin",
+            package_type="marketplace_plugin",
+            content_hash=compute_package_hash(install_path),
+        )
+        lockfile = LockFile(apm_version="0.28.0")
+        lockfile.add_dependency(locked_dependency)
+        dep_key = locked_dependency.get_unique_key()
+        ctx = _make_ctx(targets=["copilot"], existing_lockfile=lockfile)
+        dep_ref = _make_dep_ref(is_virtual=False, reference="main")
+        dep_ref.repo_url = "owner/cached-plugin"
+        source = self._make_source(
+            ctx,
+            dep_ref,
+            install_path,
+            dep_key=dep_key,
+            dep_locked_chk=locked_dependency,
+            fetched_this_run=False,
         )
 
         with (
@@ -609,12 +631,46 @@ class TestCachedDependencySourceAcquire:
             ),
         ):
             with pytest.raises(DirectDependencyError) as exc_info:
-                upgrade_cached_legacy_plugin(install_path, "owner/cached-plugin")
+                source.acquire()
 
         message = str(exc_info.value)
         assert "owner/cached-plugin" in message
         assert str(install_path) in message
         assert "apm deps clean --yes" in message
+
+    def test_fresh_cache_handoff_excludes_legacy_upgrade(self, tmp_path: Path) -> None:
+        """Fresh materialization state reaches the compatibility gate unchanged."""
+        from apm_cli.install import legacy_plugin_compat
+
+        ctx = _make_ctx(targets=["copilot"])
+        dep_ref = _make_dep_ref(is_virtual=False, reference="main")
+        install_path = tmp_path / "pkg"
+        install_path.mkdir()
+        (install_path / "apm.yml").write_text(
+            "name: mypkg\nversion: 0.1.0\n",
+            encoding="ascii",
+        )
+        source = self._make_source(
+            ctx,
+            dep_ref,
+            install_path,
+            fetched_this_run=True,
+        )
+
+        with patch.object(
+            legacy_plugin_compat,
+            "upgrade_cached_legacy_plugin",
+            return_value=None,
+        ) as upgrade:
+            result = source.acquire()
+
+        assert result.package_info is not None
+        upgrade.assert_called_once_with(
+            install_path,
+            "owner/repo",
+            lockfile=ctx.existing_lockfile,
+            fetched_this_run=True,
+        )
 
     def test_with_targets_and_apm_yml(self, tmp_path: Path) -> None:
         """Happy path: apm.yml present → full Materialization returned."""

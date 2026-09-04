@@ -516,7 +516,12 @@ class CachedDependencySource(DependencySource):
         else:
             apm_yml_path = install_path / APM_YML_FILENAME
             pkg_type, _ = detect_package_type(install_path)
-            upgraded_plugin = upgrade_cached_legacy_plugin(install_path, dep_key)
+            upgraded_plugin = upgrade_cached_legacy_plugin(
+                install_path,
+                dep_key,
+                lockfile=ctx.existing_lockfile,
+                fetched_this_run=self.fetched_this_run,
+            )
             if upgraded_plugin is not None:
                 cached_package = upgraded_plugin
             elif apm_yml_path.exists():
