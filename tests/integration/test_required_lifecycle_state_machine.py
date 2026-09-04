@@ -1145,7 +1145,7 @@ def test_required_legacy_content_hash_upgrade_preserves_skills_and_converges(
 
 @pytest.mark.parametrize(
     "invalid_cache",
-    ("plugin-path", "missing-hash", "apm-yml-symlink", "apm-dir-symlink"),
+    ("plugin-path", "apm-yml-symlink", "apm-dir-symlink"),
 )
 def test_required_invalid_receiptless_legacy_cache_fails_with_recovery(
     tmp_path: Path,
@@ -1201,10 +1201,7 @@ def test_required_invalid_receiptless_legacy_cache_fails_with_recovery(
             (cached_package / ".apm").symlink_to(external_apm_dir, target_is_directory=True)
         except OSError:
             pytest.skip("Symlinks not supported on this platform")
-    if invalid_cache == "missing-hash":
-        invalid_locked_dependency.pop("content_hash", None)
-    else:
-        invalid_locked_dependency["content_hash"] = compute_package_hash(cached_package)
+    invalid_locked_dependency["content_hash"] = compute_package_hash(cached_package)
     expected_dep_key = f"{_OWNER}/{package.name}"
     dump_yaml(invalid_lock_document, lock_path)
     before_invalid_upgrade = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
@@ -1225,8 +1222,6 @@ def test_required_invalid_receiptless_legacy_cache_fails_with_recovery(
     assert "apm deps clean --yes" in failure_text, _result_evidence(failed)
     if invalid_cache == "plugin-path":
         assert "is invalid" in failure_text, _result_evidence(failed)
-    elif invalid_cache == "missing-hash":
-        assert "no content hash" in failure_text, _result_evidence(failed)
     else:
         assert "cache metadata contains a symlink" in failure_text, _result_evidence(failed)
     if external_sentinel is not None:

@@ -273,6 +273,8 @@ def _resolve_download_strategy(
                 logger.progress(_hash_msg)
             safe_rmtree(install_path, ctx.apm_modules_dir)
             skip_download = False
+        else:
+            ctx.content_hash_verified_deps.add(dep_key)
 
     # When registry-only mode is active, bypass cache if the
     # cached artifact was NOT previously downloaded via the

@@ -355,12 +355,7 @@ class CachedDependencySource(DependencySource):
         super().__init__(ctx, dep_ref, install_path, dep_key)
         self.resolved_ref = resolved_ref
         self.dep_locked_chk = dep_locked_chk
-        # F2 (#1116): when the resolver callback fetched this package
-        # earlier in the SAME install run, we still hit the cached
-        # source path (skip_download=True), but the install line should
-        # NOT say "(cached)" -- bytes were just downloaded. The integrate
-        # phase passes True here when the dep_key is in
-        # ctx.callback_downloaded.
+        # Cached sources may wrap fresh bytes; never treat them as prior cache state.
         self.fetched_this_run = fetched_this_run
 
     def _resolve_cached_commit(self) -> str | None:
@@ -392,7 +387,7 @@ class CachedDependencySource(DependencySource):
         """
         ctx = self.ctx
         dep_key = self.dep_key
-        resolved_ref = self.resolved_ref
+        resolved_ref = self._materialized_resolved_ref()
         dep_ref = self.dep_ref
 
         cached_commit: str | None = None
@@ -418,6 +413,11 @@ class CachedDependencySource(DependencySource):
                 cached_commit = dep_ref.reference
         return cached_commit
 
+    def _materialized_resolved_ref(self) -> Any:
+        """Return the reference that produced the bytes currently on disk."""
+        pre_downloaded = self.ctx.pre_download_results.get(self.dep_key)
+        return self.resolved_ref or getattr(pre_downloaded, "resolved_reference", None)
+
     def acquire(self) -> Materialization | None:
         from apm_cli.agent_plugins.errors import AgentPluginError
         from apm_cli.bundle.local_bundle import route_agent_plugin_package
@@ -438,7 +438,7 @@ class CachedDependencySource(DependencySource):
         dep_ref = self.dep_ref
         install_path = self.install_path
         dep_key = self.dep_key
-        resolved_ref = self.resolved_ref
+        resolved_ref = self._materialized_resolved_ref()
         dep_locked_chk = self.dep_locked_chk
         logger = ctx.logger
 
@@ -519,7 +519,9 @@ class CachedDependencySource(DependencySource):
             upgraded_plugin = upgrade_cached_legacy_plugin(
                 install_path,
                 dep_key,
-                lockfile=ctx.existing_lockfile,
+                locked_dependency=dep_locked_chk,
+                lockfile_apm_version=getattr(ctx.existing_lockfile, "apm_version", None),
+                content_hash_verified=dep_key in ctx.content_hash_verified_deps,
                 fetched_this_run=self.fetched_this_run,
             )
             if upgraded_plugin is not None:
