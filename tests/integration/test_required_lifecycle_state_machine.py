@@ -1140,6 +1140,7 @@ def test_required_legacy_content_hash_upgrade_preserves_skills_and_converges(
     _assert_same_state(upgraded, converged)
 
 
+@pytest.mark.lifecycle_merge_group
 def test_required_parallel_fresh_fetch_bypasses_legacy_cache_upgrade(
     tmp_path: Path,
     apm_binary_path: Path,
@@ -1209,14 +1210,15 @@ def test_required_parallel_fresh_fetch_bypasses_legacy_cache_upgrade(
     "invalid_cache",
     (
         "plugin-path",
-        pytest.param("missing-hash", marks=pytest.mark.lifecycle_merge_group),
-        pytest.param("missing-apm-yml", marks=pytest.mark.lifecycle_merge_group),
-        pytest.param("missing-apm-dir", marks=pytest.mark.lifecycle_merge_group),
-        pytest.param("apm-yml-symlink", marks=pytest.mark.lifecycle_merge_group),
-        pytest.param("apm-dir-symlink", marks=pytest.mark.lifecycle_merge_group),
-        pytest.param("package-root-symlink", marks=pytest.mark.lifecycle_merge_group),
+        "missing-hash",
+        "missing-apm-yml",
+        "missing-apm-dir",
+        "apm-yml-symlink",
+        "apm-dir-symlink",
+        "package-root-symlink",
     ),
 )
+@pytest.mark.lifecycle_merge_group
 def test_required_invalid_receiptless_legacy_cache_fails_with_recovery(
     tmp_path: Path,
     apm_binary_path: Path,
