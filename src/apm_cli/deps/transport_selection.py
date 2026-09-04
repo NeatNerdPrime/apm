@@ -117,6 +117,9 @@ class InsteadOfResolver(Protocol):
     def resolve(self, candidate_url: str) -> str | None:  # pragma: no cover - Protocol
         ...
 
+    def has_exact_rule(self, candidate_url: str) -> bool:  # pragma: no cover - Protocol
+        ...
+
 
 class NoOpInsteadOfResolver:
     """Test/fallback resolver that always returns ``None``.
@@ -127,6 +130,9 @@ class NoOpInsteadOfResolver:
 
     def resolve(self, candidate_url: str) -> str | None:
         return None
+
+    def has_exact_rule(self, candidate_url: str) -> bool:
+        return False
 
 
 class GitConfigInsteadOfResolver:
@@ -165,6 +171,13 @@ class GitConfigInsteadOfResolver:
                 ),
             )
         return effective
+
+    def has_exact_rule(self, candidate_url: str) -> bool:
+        if self._rewrites is None:
+            with self._lock:
+                if self._rewrites is None:
+                    self._rewrites, self._http_headers = self._load_rewrites()
+        return any(prefix == candidate_url for _, prefix in self._rewrites)
 
     @staticmethod
     def _load_rewrites() -> tuple[list[tuple], tuple]:
@@ -225,6 +238,25 @@ def _dedup_attempts(attempts: list[TransportAttempt]) -> list[TransportAttempt]:
         seen.add(key)
         unique_attempts.append(attempt)
     return unique_attempts
+
+
+def _resolve_rewrite_candidate(
+    resolver: InsteadOfResolver,
+    candidate: str,
+) -> tuple[str, str | None]:
+    """Resolve a candidate without propagating a duplicated .git suffix."""
+    rewrite = resolver.resolve(candidate)
+    if not (candidate.endswith(".git") and rewrite and rewrite.endswith(".git.git")):
+        return candidate, rewrite
+    has_exact_rule = getattr(resolver, "has_exact_rule", None)
+    if not callable(has_exact_rule) or has_exact_rule(candidate):
+        return candidate, rewrite
+
+    unsuffixed_candidate = candidate.removesuffix(".git")
+    unsuffixed_rewrite = resolver.resolve(unsuffixed_candidate)
+    if unsuffixed_rewrite is not None and rewrite == f"{unsuffixed_rewrite}.git":
+        return unsuffixed_candidate, unsuffixed_rewrite
+    return candidate, rewrite
 
 
 def _rewrite_attempt(
@@ -336,14 +368,20 @@ class TransportSelector:
                     f"{getattr(dep_ref, 'repo_url', '')}"
                 )
             )
-        rewrite = self._resolver.resolve(candidate) if candidate is not None else None
+        if candidate is not None:
+            candidate, rewrite = _resolve_rewrite_candidate(self._resolver, candidate)
+        else:
+            rewrite = None
         web_candidate = candidate
         web_rewrite = rewrite
         if candidate is not None and urlsplit(candidate).scheme.lower() not in {"http", "https"}:
             web_candidate = dep_ref.to_github_url()
             if not dep_ref.is_azure_devops() and not web_candidate.endswith(".git"):
                 web_candidate = f"{web_candidate}.git"
-            web_rewrite = self._resolver.resolve(web_candidate)
+            web_candidate, web_rewrite = _resolve_rewrite_candidate(
+                self._resolver,
+                web_candidate,
+            )
 
         # 1. Explicit scheme on the URL wins for the initial attempt.
         #    In strict mode (default) the plan contains exactly that one attempt.

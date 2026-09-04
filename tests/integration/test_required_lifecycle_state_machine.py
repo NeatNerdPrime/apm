@@ -1320,6 +1320,10 @@ def test_required_global_audit_rule_matrix_for_external_roots(
     assert _check(package_removed_audit, "no-orphaned-packages")["passed"] is True
     assert _check(package_removed_audit, "deployed-files-present")["passed"] is True
     assert _check(package_removed_audit, "content-integrity")["passed"] is True
+    for check_name in ("config-consistency", "drift"):
+        message = str(_check(package_removed_audit, check_name)["message"])
+        assert "installed package materialization is missing" in message
+        assert "apm install --global" in message
     _assert_same_state(package_removed_before_audit, package_removed_after_audit)
     shutil.move(str(modules_backup), str(modules_dir))
     assert_clean("global-audit-after-package-restore")

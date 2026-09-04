@@ -265,11 +265,12 @@ def test_native_credential_env_drops_managed_token_and_retains_helper_config(
         check=True,
         capture_output=True,
         env=env,
+        cwd=tmp_path,
     )
     assert result.stdout == b"\n"
 
 
-def _urlmatched_headers(env: dict[str, str], remote_url: str) -> list[str]:
+def _urlmatched_headers(env: dict[str, str], remote_url: str, cwd: Path) -> list[str]:
     """Return the effective extraHeader values selected by real Git."""
     result = subprocess.run(
         (
@@ -283,6 +284,7 @@ def _urlmatched_headers(env: dict[str, str], remote_url: str) -> list[str]:
         capture_output=True,
         text=True,
         env=env,
+        cwd=cwd,
     )
     assert result.returncode in {0, 1}, result.stderr
     return result.stdout.splitlines()
@@ -316,9 +318,10 @@ def test_public_github_anonymous_fence_beats_url_scoped_ambient_auth(
 
     anonymous = AuthResolver.build_public_github_anonymous_git_env(base_env=base_env)
     child = git_network_env(remote_url, anonymous)
-    headers = _urlmatched_headers(child, remote_url)
+    headers = _urlmatched_headers(child, remote_url, tmp_path)
 
-    assert headers == ["X-Trace-Id: safe-value"]
+    assert len(headers) == 1
+    assert headers[0] == "X-Trace-Id: safe-value"
     assert "ambient-stale" not in repr(child)
     assert _AMBIENT_HEADER_TOKEN not in repr(child)
     scoped_values = subprocess.run(
@@ -332,6 +335,7 @@ def test_public_github_anonymous_fence_beats_url_scoped_ambient_auth(
         capture_output=True,
         text=True,
         env=child,
+        cwd=tmp_path,
     ).stdout.splitlines()
     assert scoped_values == ["", "X-Trace-Id: safe-value"]
     helpers = subprocess.run(
@@ -340,6 +344,7 @@ def test_public_github_anonymous_fence_beats_url_scoped_ambient_auth(
         capture_output=True,
         text=True,
         env=child,
+        cwd=tmp_path,
     ).stdout.splitlines()
     assert helpers[-1:] == [""]
 
@@ -360,7 +365,9 @@ def test_anonymous_snapshot_preserves_safe_header_from_normal_global_config(
     anonymous = AuthResolver.build_public_github_anonymous_git_env()
     child = git_network_env(remote_url, anonymous)
 
-    assert _urlmatched_headers(child, remote_url) == ["X-Trace-Id: safe-value"]
+    headers = _urlmatched_headers(child, remote_url, tmp_path)
+    assert len(headers) == 1
+    assert headers[0] == "X-Trace-Id: safe-value"
     assert "ambient-stale" not in repr(child)
     assert _AMBIENT_HEADER_TOKEN not in repr(child)
 
@@ -416,7 +423,7 @@ def test_managed_fence_selects_only_resolver_header_for_effective_url(
         remote_url,
     )
     child = git_network_env(remote_url, managed)
-    headers = _urlmatched_headers(child, remote_url)
+    headers = _urlmatched_headers(child, remote_url, tmp_path)
 
     assert len(headers) == 1
     assert headers[0].startswith(f"Authorization: {expected_prefix}")
@@ -433,6 +440,7 @@ def test_managed_fence_selects_only_resolver_header_for_effective_url(
         capture_output=True,
         text=True,
         env=child,
+        cwd=tmp_path,
     ).stdout.splitlines()
     assert scoped_values == [
         "",
@@ -449,7 +457,11 @@ def test_managed_fence_selects_only_resolver_header_for_effective_url(
         )
         assert decoded == f"{expected_user}:{token}"
 
-    sibling_headers = _urlmatched_headers(child, f"https://{host}/other/repo.git")
+    sibling_headers = _urlmatched_headers(
+        child,
+        f"https://{host}/other/repo.git",
+        tmp_path,
+    )
     assert all(not value.lower().startswith("authorization:") for value in sibling_headers)
 
 
@@ -468,13 +480,16 @@ def test_generic_https_fence_removes_ambient_header_but_preserves_native_helper(
     native = resolver.git_env_for_remote(_context("generic"), remote_url)
     child = git_network_env(remote_url, native)
 
-    assert _urlmatched_headers(child, remote_url) == ["X-Trace-Id: safe-value"]
+    headers = _urlmatched_headers(child, remote_url, tmp_path)
+    assert len(headers) == 1
+    assert headers[0] == "X-Trace-Id: safe-value"
     helpers = subprocess.run(
         (get_git_executable(), "config", "--get-all", "credential.helper"),
         check=True,
         capture_output=True,
         text=True,
         env=child,
+        cwd=tmp_path,
     ).stdout.splitlines()
     assert helpers == ["ambient-helper"]
     assert "ambient-stale" not in repr(child)
@@ -521,7 +536,7 @@ def test_managed_header_is_scoped_to_effective_rewritten_url(tmp_path: Path) -> 
     )
 
     child = git_network_env(requested, env)
-    matched = _urlmatched_headers(child, effective)
+    matched = _urlmatched_headers(child, effective, tmp_path)
 
     assert len(matched) == 1
     assert matched[0].startswith("Authorization: Basic ")
@@ -532,7 +547,7 @@ def test_managed_header_is_scoped_to_effective_rewritten_url(tmp_path: Path) -> 
         if child[f"GIT_CONFIG_VALUE_{index}"] == matched[0]
     }
     assert exact_keys == {f"http.{effective}.extraheader"}
-    assert _urlmatched_headers(child, "https://github.com/other/repo.git") == []
+    assert not _urlmatched_headers(child, "https://github.com/other/repo.git", tmp_path)
 
 
 @pytest.mark.parametrize("reset_scope", ("local", "worktree"))

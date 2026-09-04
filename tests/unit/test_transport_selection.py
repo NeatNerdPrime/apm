@@ -63,6 +63,9 @@ class FakeInsteadOfResolver:
                 return replacement + candidate_url[len(prefix) :]
         return None
 
+    def has_exact_rule(self, candidate_url: str) -> bool:
+        return candidate_url in self._rewrites
+
 
 def _dep(spec: str) -> DependencyReference:
     return DependencyReference.parse(spec)
@@ -133,6 +136,36 @@ class TestExplicitSchemeStrict:
         assert plan.attempts[0].requested_url == candidate
         assert plan.attempts[0].effective_url == "file:///mirror/owner/repo.git"
 
+    def test_rewrite_does_not_duplicate_dot_git_suffix(self):
+        resolver = FakeInsteadOfResolver(
+            {"https://github.com/owner/repo": "file:///tmp/mirror/repo.git"}
+        )
+
+        plan = TransportSelector(insteadof_resolver=resolver).select(
+            dep_ref=_dep("https://github.com/owner/repo.git"),
+            candidate_url="https://github.com/owner/repo.git",
+        )
+
+        assert plan.attempts[0].requested_url == "https://github.com/owner/repo"
+        assert plan.attempts[0].effective_url == "file:///tmp/mirror/repo.git"
+        assert resolver.calls == [
+            "https://github.com/owner/repo.git",
+            "https://github.com/owner/repo",
+        ]
+
+    def test_exact_dot_git_rule_is_never_substituted(self):
+        candidate = "https://github.com/owner/repo.git"
+        resolver = FakeInsteadOfResolver({candidate: "file:///tmp/exact/repo.git.git"})
+
+        plan = TransportSelector(insteadof_resolver=resolver).select(
+            dep_ref=_dep(candidate),
+            candidate_url=candidate,
+        )
+
+        assert plan.attempts[0].requested_url == candidate
+        assert plan.attempts[0].effective_url == "file:///tmp/exact/repo.git.git"
+        assert resolver.calls == [candidate]
+
     def test_explicit_http_is_strict_and_never_uses_token(self):
         sel = TransportSelector(insteadof_resolver=FakeInsteadOfResolver())
         plan = sel.select(
@@ -175,6 +208,21 @@ class TestShorthandWithInsteadOf:
         assert plan.attempts[0].effective_url == "git@github.com:owner/repo"
         assert plan.attempts[0].use_token is False
         assert plan.strict is True
+
+    def test_web_fallback_preserves_exact_dot_git_rewrite(self):
+        resolver = FakeInsteadOfResolver(
+            {"https://github.com/owner/repo.git": "file:///tmp/mirror/repo.git"}
+        )
+
+        plan = TransportSelector(insteadof_resolver=resolver).select(
+            dep_ref=_dep("owner/repo"),
+            candidate_url="owner/repo",
+            allow_fallback=True,
+            has_token=True,
+        )
+
+        assert plan.attempts[-1].requested_url == "https://github.com/owner/repo.git"
+        assert plan.attempts[-1].effective_url == "file:///tmp/mirror/repo.git"
 
     def test_canonical_candidate_preserves_custom_port_and_suffix(self):
         candidate = "https://git.example.test:8443/acme/repo.git"
