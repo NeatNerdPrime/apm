@@ -359,31 +359,10 @@ class CachedDependencySource(DependencySource):
         self.fetched_this_run = fetched_this_run
 
     def _resolve_cached_commit(self) -> str | None:
-        """Determine the SHA to record in the lockfile for the cached path.
+        """Return the commit that identifies the bytes currently on disk.
 
-        Invariant: when ``skip_download=True``, the SHA we record MUST
-        equal what is actually on disk. The previous logic promoted
-        ``resolved_ref.resolved_commit`` to the top of the priority list,
-        which silently wrote the remote HEAD even when bytes had not been
-        re-materialized -- producing a phantom identity in the lockfile
-        (3-way drift bug, PR #1158).
-
-        Priority:
-        * ``fetched_this_run``: bytes were just downloaded by the
-          resolver callback. Use the SHA captured at fetch time
-          (callback) or the resolver's own SHA. Both reflect what
-          landed on disk in this run. By construction the upstream
-          download path always populates one of those two for a
-          freshly-fetched dep, so we never fall back to the lockfile
-          here -- doing so would risk overwriting on-disk bytes with a
-          stale lockfile SHA.
-        * true cached path: trust the existing lockfile SHA. It was
-          written by a previous successful install and matches what is
-          on disk (verified upstream by the lockfile_match check).
-          NEVER use ``resolved_ref`` here.
-        * fallback to ``dep_ref.reference`` only when no lockfile SHA
-          is available (cold-path with no prior install) or when the
-          fetched-this-run path failed to capture a SHA at all.
+        Fresh materializations use callback/pre-download identity. True cache
+        hits use the verified lockfile identity, never a newer remote result.
         """
         ctx = self.ctx
         dep_key = self.dep_key
@@ -405,17 +384,17 @@ class CachedDependencySource(DependencySource):
             if locked_dep and locked_dep.resolved_commit and locked_dep.resolved_commit != "cached":
                 cached_commit = locked_dep.resolved_commit
         if not cached_commit:
-            # Registry deps identify by resolved_hash+version, not a commit SHA.
-            # dep_ref.reference is a semver range (e.g. "^1.0.0") for registry
-            # deps -- storing it as resolved_commit would corrupt the lockfile
-            # and cause the update plan to show a spurious "^1.0.0 -> -" diff.
+            # A registry reference is a semver range, not a commit identity.
             if dep_ref.source != "registry":
                 cached_commit = dep_ref.reference
         return cached_commit
 
     def _materialized_resolved_ref(self) -> Any:
         """Return the reference that produced the bytes currently on disk."""
-        pre_downloaded = self.ctx.pre_download_results.get(self.dep_key)
+        pre_download_results = self.ctx.pre_download_results
+        pre_downloaded = (
+            pre_download_results.get(self.dep_key) if self.dep_key in pre_download_results else None
+        )
         pre_downloaded_ref = getattr(pre_downloaded, "resolved_reference", None)
         if self.fetched_this_run and pre_downloaded_ref is not None:
             return pre_downloaded_ref
@@ -464,11 +443,7 @@ class CachedDependencySource(DependencySource):
             _ref = _reg_res.version if _reg_res else (dep_ref.reference or "")
         else:
             _ref = dep_ref.reference or ""
-        # F3 (#1116): centralised hex/sentinel-aware short SHA helper.
-        # Prefer the lockfile-recorded SHA when present; otherwise fall
-        # back to the SHA captured by the parallel resolver callback in
-        # this same install run (cold-path case where no lockfile exists
-        # yet, but the resolver already learned the resolved commit).
+        # Prefer the lockfile SHA, then this run's callback SHA.
         _sha = format_short_sha(dep_locked_chk.resolved_commit) if dep_locked_chk else ""
         if not _sha:
             _callback_sha = ctx.callback_downloaded.get(dep_key)

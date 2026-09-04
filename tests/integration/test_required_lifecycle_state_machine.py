@@ -1209,12 +1209,12 @@ def test_required_parallel_fresh_fetch_bypasses_legacy_cache_upgrade(
     "invalid_cache",
     (
         "plugin-path",
-        "missing-hash",
-        "missing-apm-yml",
-        "missing-apm-dir",
-        "apm-yml-symlink",
-        "apm-dir-symlink",
-        "package-root-symlink",
+        pytest.param("missing-hash", marks=pytest.mark.lifecycle_merge_group),
+        pytest.param("missing-apm-yml", marks=pytest.mark.lifecycle_merge_group),
+        pytest.param("missing-apm-dir", marks=pytest.mark.lifecycle_merge_group),
+        pytest.param("apm-yml-symlink", marks=pytest.mark.lifecycle_merge_group),
+        pytest.param("apm-dir-symlink", marks=pytest.mark.lifecycle_merge_group),
+        pytest.param("package-root-symlink", marks=pytest.mark.lifecycle_merge_group),
     ),
 )
 def test_required_invalid_receiptless_legacy_cache_fails_with_recovery(
