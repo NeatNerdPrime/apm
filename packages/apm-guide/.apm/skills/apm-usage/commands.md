@@ -31,7 +31,9 @@ validation, or activation leaves the previous package and lockfile active;
 fix the reported cause and rerun the command.
 
 `apm install` preserves the invoking repository's branch and HEAD when run from
-a Git hook; see the
+a Git hook. It rejects cross-host network rewrites for every Git host and scopes
+credentials by `(host, port, org)` plus repository path for private GitHub
+helper fallback; see the
 [install behavior reference](https://microsoft.github.io/apm/reference/cli/install/#behavior).
 
 For JavaScript hook bundles, `apm install --target copilot` and its

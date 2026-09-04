@@ -20,7 +20,7 @@ APM resolves ordinary tokens per `(host, port, org)` scope. When a private `gith
 4. **Generic hosts** (other FQDNs such as Bitbucket): host-specific **git credential helper** or unauthenticated/public access -- **no** GitHub, GitLab, or ADO platform env vars.
 
 If a GitHub- or GitLab-class token fails, supported paths may retry the native
-Git credential chain. ADO never invokes native Git credential helpers: Azure
+Git credential chain. No ADO Git path invokes native credential helpers: Azure
 DevOps Services retries a rejected `ADO_APM_PAT` with the Azure CLI bearer,
 while Azure DevOps Server remains PAT-only. Hosts with public repositories may
 then allow unauthenticated access according to their provider policy.
@@ -31,11 +31,11 @@ Results are cached per-process. Validation, persistent Git cache population, and
 
 APM preserves safe `url.<base>.insteadOf` rules, including HTTPS-to-SSH and
 local mirror rewrites. Before each dependency Git operation that consumes a
-remote URL, it rejects a matching rewrite that embeds credentials, downgrades
-transport security, selects remote-helper syntax such as `ext::` or `https::`,
-or redirects a network remote to another host. Same-host HTTPS-to-SSH and local
-mirror rewrites remain supported. This prevents a rewrite from changing package
-provenance or carrying a resolved token to a different endpoint.
+remote URL, it rejects credentials, downgrades to insecure transports such as
+`http://` or `git://`, remote-helper syntax such as `ext::` or `https::`, and
+every cross-host network target, regardless of host class. A managed HTTPS
+credential also cannot cross a scheme, host, or port boundary. Same-host SSH and
+local-mirror selections remain credential-free.
 
 If a rewrite is rejected, find its source and remove or replace it:
 
@@ -47,19 +47,10 @@ If the selected rewrite is a `file://` mirror and the clone fails, verify that
 the local path exists and is readable. Fix or remove that rewrite; configuring
 an SSH key or token does not repair a missing local mirror.
 
-APM evaluates clone rewrites without the invoking repository's local
-`.git/config`, because `git clone` does not consume that local config.
-It snapshots effective global and system Git config, selects and validates Git's
-longest matching rewrite for the remote, passes the flattened snapshot to the
-child process, and disables later reads from mutable global and system files.
-Repository-local config is considered only for APM-owned caches and worktrees
-and its network-relevant entries are copied into the ordered snapshot, then
-revalidated after materialization and before remote use. Anonymous attempts add
-an empty header at the effective URL; managed attempts add only the
-AuthResolver-selected header at that URL. More-specific ambient headers cannot
-override either fence or follow a request to another repository.
-Dependency clone and init commands ignore Git templates, and checkout hooks
-remain disabled.
+APM snapshots the effective Git config, validates the longest matching rewrite,
+and freezes the result for the child process. It drops malformed ambient HTTP
+headers before applying an anonymous empty-header fence or one path-scoped
+AuthResolver header. Dependency clones ignore Git templates and checkout hooks.
 
 ## Token lookup
 ### GitHub-class hosts (`github.com`, `*.ghe.com`, GHES via `GITHUB_HOST`)

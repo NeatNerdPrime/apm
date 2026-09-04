@@ -225,9 +225,6 @@ configuration. Safe rules may select the same host over SSH or a local mirror.
 Unsafe credential, downgrade, remote-helper, and cross-host network rewrites fail
 before Git contacts the remote. See
 [Git URL rewrite safety](../../getting-started/authentication/#git-url-rewrite-safety).
-If an effective `file://` mirror fails, check that the local path exists and is
-readable, then inspect the matching `insteadOf` rule. Host credentials cannot
-repair a missing local mirror.
 
 Cross-protocol retry is off by default. Use `--allow-protocol-fallback` or
 `APM_ALLOW_PROTOCOL_FALLBACK=1` only for a migration window. Save a shorthand

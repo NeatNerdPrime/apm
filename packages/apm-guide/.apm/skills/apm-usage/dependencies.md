@@ -99,21 +99,20 @@ fallback enabled with `--allow-protocol-fallback`).
 Strict by default. Pick the transport up front; APM never silently retries
 across protocols.
 
-| Dependency form | What APM tries |
+| Dependency form | Initial transport |
 |-----------------|----------------|
-| `ssh://...` or `git@host:...` | SSH only |
-| `https://...` or `http://...` | HTTP(S) only |
-| Shorthand with `--ssh`, `APM_GIT_PROTOCOL=ssh`, or saved `prefer-ssh` | SSH only |
-| Shorthand otherwise | HTTPS only |
+| `ssh://...` or `git@host:...` | SSH |
+| `https://...` or `http://...` | The explicit HTTP(S) scheme |
+| Shorthand with `--ssh`, `APM_GIT_PROTOCOL=ssh`, or saved `prefer-ssh` | SSH |
+| Shorthand otherwise | HTTPS |
 
 A failed clone fails loudly, naming the URL and the protocol attempted.
 An explicit scheme prevents APM from selecting another protocol unless
 cross-protocol fallback is enabled. Git still applies a matching safe
 `url.<base>.insteadOf` rule to the selected URL, which may choose the same host
 over SSH or a local mirror.
-If an effective `file://` mirror fails, verify that its path exists and is
-readable, then fix or remove the matching rule. Host credentials do not repair
-a missing local mirror.
+For rewrite rejection and local-mirror recovery, see
+[authentication](authentication.md).
 This includes in-repository plugins from GitLab and generic git marketplaces:
 an SSH registration is persisted as SSH `git:` and `path:`; an HTTPS
 registration remains HTTPS.
