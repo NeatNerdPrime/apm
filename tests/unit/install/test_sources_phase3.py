@@ -433,7 +433,13 @@ class TestResolveCachedCommit:
         package_info.resolved_reference.resolved_commit = "pre_downloaded_sha"
         ctx.pre_download_results = {"owner/repo": package_info}
         dep_ref = _make_dep_ref(reference="main")
-        source = self._make_source(ctx, dep_ref, fetched_this_run=True)
+        stale_resolved_ref = MagicMock(resolved_commit="stale_resolved_sha")
+        source = self._make_source(
+            ctx,
+            dep_ref,
+            resolved_ref=stale_resolved_ref,
+            fetched_this_run=True,
+        )
 
         result = source._resolve_cached_commit()
 
