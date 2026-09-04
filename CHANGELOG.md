@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `apm install` now performs a hash-verified cached APM 0.28
+  marketplace-plugin upgrade before stale cleanup, preserving prior Claude and
+  Codex deployments instead of deleting them. (fixes #2744) (#2787)
 - `apm install` launched from Git hooks now isolates dependency Git operations
   from the invoking repository, preventing installs from detaching or mutating
   the caller's branch. Safe Git URL rewrites remain supported; credential-bearing,
