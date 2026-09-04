@@ -173,11 +173,17 @@ class GitConfigInsteadOfResolver:
         Returns an empty list if git is missing, exits non-zero, or no
         rewrites are configured.
         """
-        from ..utils.git_env import configured_git_url_policy
+        from ..utils.git_env import (
+            GitUrlRewriteError,
+            GitUrlRewriteProbeError,
+            configured_git_url_policy,
+        )
 
         try:
             rewrites, http_headers = configured_git_url_policy()
             return list(rewrites), http_headers
+        except (GitUrlRewriteError, GitUrlRewriteProbeError):
+            raise
         except (FileNotFoundError, OSError, ValueError):
             return [], ()
 

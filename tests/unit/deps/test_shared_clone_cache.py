@@ -1184,11 +1184,13 @@ class TestAdoBareBearerRetry:
     """
 
     def _make_ado_downloader(self, tmp_path: Path):
+        from apm_cli.core.auth import AuthContext, AuthResolver, HostInfo
         from apm_cli.deps.github_downloader import GitHubPackageDownloader
         from apm_cli.deps.transport_selection import TransportAttempt, TransportPlan
 
         d = GitHubPackageDownloader.__new__(GitHubPackageDownloader)
-        d.auth_resolver = MagicMock()
+        d.auth_resolver = AuthResolver()
+        d.auth_resolver.emit_stale_pat_diagnostic = MagicMock()
         d.token_manager = MagicMock()
         d._transport_selector = MagicMock()
         d._protocol_pref = MagicMock()
@@ -1207,9 +1209,19 @@ class TestAdoBareBearerRetry:
             )
         )
         d._resolve_dep_token = MagicMock(return_value="pat-token")
-        ctx = MagicMock()
-        ctx.auth_scheme = "basic"
-        ctx.git_env = {}
+        ctx = AuthContext(
+            token="pat-token",
+            source="ADO_APM_PAT",
+            token_type="unknown",
+            host_info=HostInfo(
+                host="dev.azure.com",
+                kind="ado",
+                has_public_repos=False,
+                api_base="https://dev.azure.com",
+            ),
+            git_env={},
+            auth_scheme="basic",
+        )
         d._resolve_dep_auth_ctx = MagicMock(return_value=ctx)
         d._sanitize_git_error = MagicMock(side_effect=lambda s: s)
 

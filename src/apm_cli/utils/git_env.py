@@ -85,6 +85,7 @@ _GIT_CHILD_TOKEN_ENV_PREFIXES = (
     "APM_REGISTRY_USER_",
     "GITHUB_APM_PAT_",
 )
+_MANAGED_GIT_AUTH_INTENT_ENV = "APM_GIT_MANAGED_AUTH_INTENT"
 _AUTH_HEADER_RE = re.compile(r"(?im)(authorization:\s*)[^\r\n]+")
 _DIAGNOSTIC_GIT_URL_RE = re.compile(r"(?i)\b(?:https?|ssh|git)://[^\s'\"<>]+")
 _URL_USERINFO_RE = re.compile(r"(https?://)[^/@\s]+@")
@@ -101,7 +102,8 @@ _BARE_PLATFORM_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
     r"github_pat_[A-Za-z0-9_]{20,}|"
     r"gh[oprsu]_[A-Za-z0-9_]{6,}|"
-    r"glpat[-_][A-Za-z0-9_-]{6,}|"
+    r"gl(?:agent|cbt|ft|pat|ptt|rt|soat)[-_][A-Za-z0-9_-]{6,}|"
+    r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}|"
     r"[A-Za-z0-9]{75}AZDO[A-Za-z0-9]{5}|"
     r"[A-Za-z0-9]{52}"
     r")(?![A-Za-z0-9_])"
@@ -128,6 +130,7 @@ _SENSITIVE_HTTP_HEADER_PARTS = frozenset(
 )
 _REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 _SCP_HOST_RE = re.compile(r"^(?:[^/@:\s]+@)?(\[[^\]]+\]|[^/:@\s]+):")
+_HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 _URL_REWRITE_RECOVERY = (
     "inspect matching rules with "
@@ -273,6 +276,8 @@ def _redact_git_diagnostic_url(match: re.Match[str]) -> str:
 
 def _is_credential_bearing_http_header(value: str) -> bool:
     """Return whether one http.extraHeader value can carry a credential."""
+    if not _is_valid_http_extraheader_value(value):
+        return False
     stripped = value.strip()
     if not stripped:
         return False
@@ -285,6 +290,20 @@ def _is_credential_bearing_http_header(value: str) -> bool:
         return True
     parts = frozenset(part for part in re.split(r"[^a-z0-9]+", name.lower()) if part)
     return bool(parts & _SENSITIVE_HTTP_HEADER_PARTS)
+
+
+def _is_valid_http_extraheader_value(value: str) -> bool:
+    """Return whether one ambient value is a single valid HTTP header line."""
+    if not value.strip():
+        return True
+    if any(character in value for character in ("\r", "\n", "\0")):
+        return False
+    if any(
+        (ord(character) < 32 and character != "\t") or ord(character) == 127 for character in value
+    ):
+        return False
+    name, separator, _field_value = value.partition(":")
+    return bool(separator and _HTTP_HEADER_NAME_RE.fullmatch(name))
 
 
 def _is_http_extraheader_key(key: str) -> bool:
@@ -334,6 +353,7 @@ def clear_git_auth_env(
     remove_helpers: bool = False,
 ) -> None:
     """Remove inherited Git authorization channels while retaining other config."""
+    env.pop(_MANAGED_GIT_AUTH_INTENT_ENV, None)
     env.pop("GIT_TOKEN", None)
     env.pop("GIT_HTTP_EXTRAHEADER", None)
     env.pop("GIT_CONFIG_PARAMETERS", None)
@@ -347,7 +367,11 @@ def clear_git_auth_env(
         value = env.pop(f"GIT_CONFIG_VALUE_{index}", "")
         if (
             _is_http_extraheader_key(key)
-            and (not value.strip() or _is_credential_bearing_http_header(value))
+            and (
+                not _is_valid_http_extraheader_value(value)
+                or not value.strip()
+                or _is_credential_bearing_http_header(value)
+            )
         ) or value.strip().lower().startswith("authorization:"):
             continue
         if remove_helpers and _is_credential_helper_key(key):
@@ -478,7 +502,7 @@ def _read_effective_git_config(
         entries.append(config_entry)
         normalized = key_text.lower()
         if normalized.startswith("http.") or normalized == "http.extraheader":
-            if normalized.endswith(".extraheader"):
+            if normalized.endswith(".extraheader") and _is_valid_http_extraheader_value(value_text):
                 http_headers.append(config_entry)
             continue
         if not normalized.startswith("url.") or not normalized.endswith(".insteadof"):
@@ -496,7 +520,10 @@ def _has_applicable_http_authorization(
     env: dict[str, str],
 ) -> bool:
     """Ask Git which URL-scoped extra headers apply to one remote."""
-    if _is_credential_bearing_http_header(env.get("GIT_HTTP_EXTRAHEADER", "")):
+    direct_header = env.get("GIT_HTTP_EXTRAHEADER", "")
+    if _is_valid_http_extraheader_value(direct_header) and _is_credential_bearing_http_header(
+        direct_header
+    ):
         return True
     selected = _urlmatched_header_group(remote_url, headers, env)
     active: list[str] = []
@@ -635,6 +662,7 @@ def validate_resolved_git_url_rewrite(
     effective_url: str,
     *,
     has_authorization: bool,
+    managed_auth_intent: bool = False,
 ) -> None:
     """Validate one effective URL selected by Git's rewrite rules."""
     if _REMOTE_HELPER_RE.match(effective_url):
@@ -680,7 +708,26 @@ def validate_resolved_git_url_rewrite(
             "credential-origin",
             "Credential-bearing Git remote must not be rewritten",
         )
-    if target_scheme in {"http", "https"} and has_authorization and source_origin != target_origin:
+    if (
+        managed_auth_intent
+        and target_scheme in {"http", "https"}
+        and (source_scheme not in {"http", "https"} or source_origin != target_origin)
+    ):
+        target_label = (
+            f"{target_scheme.upper()} origin"
+            if target_scheme in {"http", "https"}
+            else "transport origin"
+        )
+        raise GitUrlRewriteError(
+            "credential-origin",
+            f"Managed-auth Git remote must not rewrite to a different {target_label}",
+        )
+    if (
+        not managed_auth_intent
+        and target_scheme in {"http", "https"}
+        and has_authorization
+        and source_origin != target_origin
+    ):
         raise GitUrlRewriteError(
             "credential-origin",
             f"Authenticated Git remote must not rewrite to a different "
@@ -728,6 +775,7 @@ def _validated_git_url_rewrite_policy(
             snapshot.http_headers,
             env,
         ),
+        managed_auth_intent=env.get(_MANAGED_GIT_AUTH_INTENT_ENV) == "1",
     )
     return effective_url, snapshot
 
@@ -788,6 +836,7 @@ def set_git_authorization_header(
     clear_git_auth_env(env, remove_helpers=True)
     _append_git_config_entry(env, "credential.helper", "")
     _append_git_config_entry(env, "http.extraheader", f"Authorization: {scheme} {credential}")
+    env[_MANAGED_GIT_AUTH_INTENT_ENV] = "1"
 
 
 def _append_git_config_entry(env: dict[str, str], key: str, value: str) -> None:
@@ -870,6 +919,10 @@ def _materialize_git_config_snapshot(
             normalized.startswith("includeif.") and normalized.endswith(".path")
         ):
             continue
+        if _is_http_extraheader_key(normalized) and not _is_valid_http_extraheader_value(
+            entry.value
+        ):
+            continue
         if not retain_auth and _is_http_extraheader_key(normalized):
             continue
         if auth_fence is not None:
@@ -923,6 +976,8 @@ def _active_header_values(entries: Sequence[GitConfigEntry]) -> tuple[str, ...]:
     """Apply Git's empty-value reset semantics to one selected header group."""
     active: list[str] = []
     for entry in entries:
+        if not _is_valid_http_extraheader_value(entry.value):
+            continue
         if entry.value.strip():
             active.append(entry.value)
         else:
@@ -936,6 +991,7 @@ def _build_git_auth_fence(
     env: dict[str, str],
     *,
     intent_snapshot: _GitConfigSnapshot | None = None,
+    managed_auth_intent: bool = False,
 ) -> _GitAuthFence | None:
     """Build the anonymous/native/managed header snapshot for one HTTP URL."""
     if urlsplit(transport_url).scheme.lower() not in {"http", "https"}:
@@ -943,8 +999,18 @@ def _build_git_auth_fence(
     intent = intent_snapshot or snapshot
     command_headers = tuple(entry for entry in intent.http_headers if entry.scope == "command")
     command_group = _urlmatched_header_group(transport_url, command_headers, env)
-    command_values = _active_header_values(command_group)
-    managed = tuple(value for value in command_values if _is_credential_bearing_http_header(value))
+    managed = (
+        tuple(
+            entry.value
+            for entry in command_headers
+            if _is_http_extraheader_key(entry.key)
+            and _is_credential_bearing_http_header(entry.value)
+        )
+        if managed_auth_intent
+        else ()
+    )
+    if managed_auth_intent and not managed:
+        raise GitUrlRewriteProbeError("managed Git auth intent lost its Authorization header")
     reset_headers = any(not entry.value.strip() for entry in command_group)
     helper_reset = any(
         entry.scope == "command"
@@ -995,6 +1061,9 @@ def git_network_env(
 ) -> dict[str, str]:
     """Return the canonical validated environment for one network Git URL."""
     env = git_subprocess_env(overrides)
+    if not _is_valid_http_extraheader_value(env.get("GIT_HTTP_EXTRAHEADER", "")):
+        env.pop("GIT_HTTP_EXTRAHEADER", None)
+    managed_auth_intent = env.get(_MANAGED_GIT_AUTH_INTENT_ENV) == "1"
     parent_snapshot: _GitConfigSnapshot | None = None
     if overrides is not None:
         parent_snapshot = _append_parent_git_config(env, git_dir=git_dir, worktree=worktree)
@@ -1020,6 +1089,7 @@ def git_network_env(
             snapshot,
             env,
             intent_snapshot=intent_snapshot,
+            managed_auth_intent=managed_auth_intent,
         )
         if retain_auth
         else None

@@ -24,6 +24,15 @@ def _assert_github_basic_header(value: str, token: str) -> None:
     assert base64.b64decode(encoded).decode() == f"x-access-token:{token}"
 
 
+def _git_config_entries(env: dict[str, str]) -> dict[str, list[str]]:
+    """Return indexed Git config values grouped by normalized key."""
+    entries: dict[str, list[str]] = {}
+    for index in range(int(env.get("GIT_CONFIG_COUNT", "0"))):
+        key = env.get(f"GIT_CONFIG_KEY_{index}", "").lower()
+        entries.setdefault(key, []).append(env.get(f"GIT_CONFIG_VALUE_{index}", ""))
+    return entries
+
+
 def _response(status_code: int, headers: dict[str, str] | None = None) -> MagicMock:
     """Build an HTTP response whose status check raises for failures."""
     response = MagicMock()
@@ -184,8 +193,9 @@ def test_private_fallback_uses_only_auth_resolver_git_environment() -> None:
 
     assert result.resolved_commit == _SHA
     git_env = transport_factory.call_args.kwargs["git_env"]
-    assert git_env["GIT_CONFIG_KEY_0"] == "http.extraheader"
-    _assert_github_basic_header(git_env["GIT_CONFIG_VALUE_0"], "private-token")
+    entries = _git_config_entries(git_env)
+    assert entries["credential.helper"] == [""]
+    _assert_github_basic_header(entries["http.extraheader"][-1], "private-token")
     assert "GIT_TOKEN" not in git_env
     assert url.call_args.kwargs["token"] == ""
 
@@ -218,11 +228,10 @@ def test_private_fallback_sets_header_after_retained_git_config() -> None:
         )
 
     git_env = transport_factory.call_args.kwargs["git_env"]
-    assert git_env["GIT_CONFIG_COUNT"] == "2"
-    assert git_env["GIT_CONFIG_KEY_0"] == "safe.bareRepository"
-    assert git_env["GIT_CONFIG_VALUE_0"] == "explicit"
-    assert git_env["GIT_CONFIG_KEY_1"] == "http.extraheader"
-    _assert_github_basic_header(git_env["GIT_CONFIG_VALUE_1"], "private-token")
+    entries = _git_config_entries(git_env)
+    assert entries["safe.barerepository"] == ["explicit"]
+    assert entries["credential.helper"] == [""]
+    _assert_github_basic_header(entries["http.extraheader"][-1], "private-token")
     assert "GIT_TOKEN" not in git_env
 
 

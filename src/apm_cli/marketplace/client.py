@@ -930,7 +930,12 @@ def _fetch_local_via_git_show(
     source: MarketplaceSource, file_path: str, git_dir: Path
 ) -> dict | None:
     """Use ``git show <ref>:<file>`` against a bare repo or .git directory."""
-    from ..utils.git_env import get_git_executable, git_no_hooks_args, git_subprocess_env
+    from ..utils.git_env import (
+        get_git_executable,
+        git_no_hooks_args,
+        git_subprocess_env,
+        redact_git_diagnostic,
+    )
 
     cmd = [
         get_git_executable(),
@@ -960,7 +965,10 @@ def _fetch_local_via_git_show(
             or "fatal: path" in stderr.lower()
         ):
             return None
-        raise MarketplaceFetchError(source.name, f"git show failed: {stderr}")
+        raise MarketplaceFetchError(
+            source.name,
+            f"git show failed: {redact_git_diagnostic(stderr)}",
+        )
 
     try:
         return json.loads(result.stdout.decode("utf-8"))

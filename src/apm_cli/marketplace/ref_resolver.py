@@ -22,6 +22,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 
+from ..utils.git_env import redact_git_diagnostic
 from ..utils.github_host import (
     build_ado_https_clone_url,
     build_ado_ssh_url,
@@ -32,7 +33,7 @@ from ..utils.github_host import (
     is_azure_devops_hostname,
     is_visualstudio_legacy_hostname,
 )
-from ._git_utils import redact_token as _redact_token
+from ._git_utils import redact_token as _redact_token  # noqa: F401
 from .errors import GitLsRemoteError, OfflineMissError
 from .git_stderr import translate_git_stderr
 
@@ -108,7 +109,9 @@ class _RemoteAttemptError(RuntimeError):
 
     def __init__(self, result: subprocess.CompletedProcess[str]) -> None:
         self.result = result
-        super().__init__(result.stderr or f"git ls-remote exited {result.returncode}")
+        super().__init__(
+            redact_git_diagnostic(result.stderr or f"git ls-remote exited {result.returncode}")
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +479,7 @@ class RefResolver:
                 return fallback_refs
 
             if result.returncode != 0:
-                stderr = _redact_token(result.stderr)
+                stderr = redact_git_diagnostic(result.stderr)
                 if self._stderr_translator:
                     translated = translate_git_stderr(
                         stderr,
@@ -492,7 +495,7 @@ class RefResolver:
                 raise GitLsRemoteError(
                     package="",
                     summary=f"git ls-remote failed for '{owner_repo}' (exit {result.returncode}).",
-                    hint=_redact_token(stderr[:200]) if stderr else "No stderr output.",
+                    hint=redact_git_diagnostic(stderr[:200]) if stderr else "No stderr output.",
                 )
 
             refs = _parse_ls_remote_output(result.stdout)
@@ -624,7 +627,7 @@ class RefResolver:
             )
 
         if result.returncode != 0:
-            stderr = _redact_token(result.stderr)
+            stderr = redact_git_diagnostic(result.stderr)
             if self._stderr_translator:
                 translated = translate_git_stderr(
                     stderr,
@@ -640,7 +643,7 @@ class RefResolver:
             raise GitLsRemoteError(
                 package="",
                 summary=f"git ls-remote failed for '{owner_repo}' (exit {result.returncode}).",
-                hint=_redact_token(stderr[:200]) if stderr else "No stderr output.",
+                hint=redact_git_diagnostic(stderr[:200]) if stderr else "No stderr output.",
             )
 
         refs = _parse_ls_remote_output(result.stdout)

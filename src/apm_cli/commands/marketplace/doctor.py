@@ -190,7 +190,9 @@ def run_doctor(verbose: bool, *, logger_name: str = "doctor") -> int:
     except ValueError as exc:
         net_detail = str(exc)
     except (subprocess.SubprocessError, OSError) as exc:
-        net_detail = str(exc)[:60]
+        from ...utils.git_env import git_subprocess_error_text
+
+        net_detail = git_subprocess_error_text(exc)[:60]
 
     checks.append(
         _DoctorCheck(

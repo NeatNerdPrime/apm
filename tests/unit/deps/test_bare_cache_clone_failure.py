@@ -27,6 +27,9 @@ def _clone_failure_message(
     fallback_hint: str | None = None,
     effective_url: str | None = None,
     is_generic: bool = False,
+    is_ado: bool = False,
+    dep_host: str = "github.com",
+    configured_github_host: str = "github.com",
 ) -> str:
     """Build a clone failure message for an SSH diagnostic scenario."""
     command_scheme = command_scheme or attempt_scheme
@@ -55,29 +58,47 @@ def _clone_failure_message(
         plan=plan,
         dep_ref=DependencyReference(
             repo_url="owner/repo",
-            host="github.com",
+            host=dep_host,
             explicit_scheme=attempt_scheme,
         ),
-        dep_host="github.com",
-        is_ado=False,
+        dep_host=dep_host,
+        is_ado=is_ado,
         is_generic=is_generic,
         has_ado_token=False,
         has_token=False,
         auth_resolver=auth_resolver,
-        configured_github_host="github.com",
+        configured_github_host=configured_github_host,
         default_host_fn=lambda: "github.com",
         last_error=last_error,
         last_attempt_scheme=attempt_scheme,
     )
 
 
-def test_clone_failure_message_explains_local_mirror_failure() -> None:
+@pytest.mark.parametrize(
+    ("dep_host", "is_generic", "is_ado", "configured_github_host"),
+    (
+        ("git.example.test", True, False, ""),
+        ("github.com", False, False, "github.com"),
+        ("github.enterprise.test", False, False, "github.enterprise.test"),
+        ("dev.azure.com", False, True, ""),
+    ),
+    ids=("generic", "github", "ghes", "ado"),
+)
+def test_clone_failure_message_explains_local_mirror_failure(
+    dep_host: str,
+    is_generic: bool,
+    is_ado: bool,
+    configured_github_host: str,
+) -> None:
     """A failed file rewrite points to mirror configuration, not host auth."""
     message = _clone_failure_message(
         stderr=b"fatal: repository not found\n",
         attempt_scheme="https",
         effective_url="file:///fixture/mirror.git",
-        is_generic=True,
+        is_generic=is_generic,
+        is_ado=is_ado,
+        dep_host=dep_host,
+        configured_github_host=configured_github_host,
     )
 
     assert "configured local Git mirror failed" in message

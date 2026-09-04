@@ -44,6 +44,7 @@ import yaml
 from click.testing import CliRunner
 
 from apm_cli.cli import cli
+from apm_cli.core.auth import AuthResolver
 from apm_cli.marketplace.ref_resolver import RemoteRef
 from apm_cli.models.apm_package import (
     APMPackage,
@@ -52,7 +53,9 @@ from apm_cli.models.apm_package import (
     clear_apm_yml_cache,
 )
 from apm_cli.models.dependency.types import GitReferenceType, ResolvedReference
+from tests.utils.git_credential_shim import GitCredentialShimFactory
 from tests.utils.isolated_apm_environment import IsolatedApmEnvironment
+from tests.utils.local_git_http_server import LocalGitHttpServerFactory
 from tests.utils.local_git_repository import LocalGitRepositoryFactory
 
 _PATCH_UPDATES = "apm_cli.commands._helpers.check_for_updates"
@@ -620,6 +623,131 @@ def test_real_git_semver_environment_build_is_single_flight(
     assert {resolution.resolved_sha for resolution in resolutions} == {commit.sha}
     assert resolver.build_count == 1
     assert len(shared_cache) == 1
+
+
+def test_private_github_semver_resolution_is_single_flight_under_concurrency(
+    tmp_path: Path,
+) -> None:
+    """Concurrent private semver workers share auth, environment, and discovery."""
+    from apm_cli.deps.transport_selection import TransportSelector
+    from apm_cli.install.helpers.ref_reuse import maybe_resolve_git_semver
+    from apm_cli.utils.git_env import get_git_executable, reset_git_cache
+
+    isolated = IsolatedApmEnvironment.create(tmp_path / "private", base_env=dict(os.environ))
+    environment = isolated.subprocess_env()
+    source = isolated.package_root / "mono"
+    source.mkdir(parents=True)
+    (source / "apm.yml").write_text(
+        "name: mono\nversion: 1.2.0\ndescription: private fixture\n",
+        encoding="ascii",
+    )
+    repositories = LocalGitRepositoryFactory(isolated.repository_root, env=environment)
+    repository = repositories.create("mono", source_tree=source)
+    commit = repositories.commit(repository, message="private mono v1.2.0")
+    repositories.tag(repository, "v1.2.0", commit)
+    real_git = Path(get_git_executable()).resolve()
+    server_factory = LocalGitHttpServerFactory(
+        isolated.repository_root,
+        real_git=real_git,
+        env=environment,
+    )
+    token = "private-single-flight-token"
+
+    class _CountingAuthResolver(AuthResolver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.credential_resolutions = 0
+            self.managed_environment_builds = 0
+            self.count_lock = threading.Lock()
+
+        def _resolve_token(self, *args, **kwargs):
+            with self.count_lock:
+                self.credential_resolutions += 1
+            return super()._resolve_token(*args, **kwargs)
+
+        def git_env_for_context(self, ctx, *, base_env):
+            with self.count_lock:
+                self.managed_environment_builds += 1
+            return super().git_env_for_context(ctx, base_env=base_env)
+
+    with server_factory.start(
+        (repository,),
+        password=token,
+        private_repositories=(repository,),
+    ) as server:
+        requested = "https://github.com/fixture-private/mono.git"
+        shim = GitCredentialShimFactory(isolated.root / "shims").create(
+            base_env=environment,
+            real_git=real_git,
+            remote_map={"fixture-private/mono": server.remote_url(repository)},
+            credential=token,
+        )
+        child_env = dict(shim.environment)
+        child_env["GIT_ALLOW_PROTOCOL"] = "file:http:https"
+        resolver = _CountingAuthResolver()
+        shared_cache: dict = {}
+        shared_lock = threading.Lock()
+        workers = 8
+        barrier = threading.Barrier(workers)
+
+        def resolve_one(_index: int):
+            dep = DependencyReference.parse(f"{requested}#^1.0.0")
+            dep.source = "git"
+            barrier.wait(timeout=10)
+            return maybe_resolve_git_semver(
+                dep_ref=dep,
+                existing_lockfile=None,
+                update_refs=True,
+                auth_resolver=resolver,
+                ref_resolver_cache=shared_cache,
+                ref_resolver_cache_lock=shared_lock,
+                transport_selector=TransportSelector(),
+            )
+
+        reset_git_cache()
+        try:
+            with patch.dict(os.environ, child_env, clear=True):
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    resolutions = list(executor.map(resolve_one, range(workers)))
+        finally:
+            reset_git_cache()
+
+        observations = server.observations
+        credential_events = [
+            event for event in shim.events() if event.get("event") == "credential-fill"
+        ]
+        remote_events = [
+            event
+            for event in shim.events()
+            if event.get("event") == "git"
+            and event.get("command") == "ls-remote"
+            and event.get("remotes")
+        ]
+
+    assert {resolution.resolved_tag for resolution in resolutions} == {"v1.2.0"}
+    assert {resolution.resolved_sha for resolution in resolutions} == {commit.sha}
+    assert resolver.credential_resolutions == 1
+    assert resolver.managed_environment_builds == 1
+    assert len(shared_cache) == 1
+    assert len(remote_events) == 2
+    assert [event["auth_config_present"] for event in remote_events] == [False, True]
+    tag_discovery = [
+        observation for observation in observations if observation.path.endswith("/info/refs")
+    ]
+    assert len(tag_discovery) >= 2
+    assert tag_discovery[0].accepted is False
+    assert tag_discovery[0].authorization is None
+    assert any(observation.authorization is not None for observation in tag_discovery)
+    assert tag_discovery[-1].accepted is True
+    assert credential_events == [
+        {
+            "credential_interactive": [],
+            "event": "credential-fill",
+            "host": "github.com",
+            "path": "fixture-private/mono",
+            "protocol": "https",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

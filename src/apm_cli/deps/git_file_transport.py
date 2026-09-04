@@ -34,7 +34,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..utils.git_env import git_no_hooks_args, git_no_templates_args
+from ..utils.git_env import (
+    git_no_hooks_args,
+    git_no_templates_args,
+    redact_git_diagnostic,
+)
 from ..utils.path_security import ensure_path_within, validate_path_segments
 
 if TYPE_CHECKING:
@@ -62,7 +66,7 @@ class GitFileFetchResult:
 def _debug(message: str) -> None:
     """Print debug message if APM_DEBUG environment variable is set."""
     if os.environ.get("APM_DEBUG"):
-        print(f"[DEBUG] {message}", file=sys.stderr)
+        print(f"[DEBUG] {redact_git_diagnostic(message)}", file=sys.stderr)
 
 
 class GitSparseFileTransport:

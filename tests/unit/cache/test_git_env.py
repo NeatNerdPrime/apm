@@ -22,6 +22,7 @@ from apm_cli.utils.git_env import (
     git_subprocess_env,
     git_subprocess_error_text,
     reset_git_cache,
+    set_git_authorization_header,
 )
 
 # Entire module: this is the canonical owner of resolved,
@@ -207,10 +208,20 @@ class TestGitSubprocessEnv:
             "github_pat_" + "A" * 30,
             "ghp_" + "B" * 36,
             "glpat-" + "C" * 24,
+            "glrt-" + "R" * 24,
+            "eyJ" + "A" * 20 + "." + "B" * 20 + "." + "C" * 20,
             "D" * 75 + "AZDO" + "E" * 5,
             "F" * 52,
         ),
-        ids=("github-fine-grained", "github-classic", "gitlab", "ado-new", "ado-legacy"),
+        ids=(
+            "github-fine-grained",
+            "github-classic",
+            "gitlab-pat",
+            "gitlab-runner",
+            "aad-jwt",
+            "ado-new",
+            "ado-legacy",
+        ),
     )
     def test_subprocess_error_text_redacts_bare_platform_tokens(self, secret: str) -> None:
         exc = subprocess.CalledProcessError(
@@ -541,6 +552,76 @@ class TestGitSubprocessEnv:
             )
 
         assert "clone" in run.call_args_list[-1].args[0]
+
+    def test_managed_auth_rejects_port_rewrite_masked_by_empty_target_header(
+        self,
+        tmp_path,
+    ) -> None:
+        config = tmp_path / "gitconfig"
+        config.write_text(
+            '[url "https://git.example.com:8443/"]\n'
+            "\tinsteadOf = https://git.example.com/\n"
+            '[http "https://git.example.com:8443/"]\n'
+            "\textraHeader =\n",
+            encoding="ascii",
+        )
+        env = {
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_GLOBAL": str(config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        set_git_authorization_header(env, "Basic", "managed-sentinel")
+
+        with (
+            patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            patch(
+                "apm_cli.utils.git_env.subprocess.run",
+                side_effect=_run_real_git_config_and_fake_clone,
+            ),
+            pytest.raises(GitUrlRewriteError, match="different HTTPS origin"),
+        ):
+            clone_git_worktree(
+                "https://git.example.com/acme/repo",
+                tmp_path / "clone",
+                env=env,
+            )
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        (
+            (
+                "GIT_HTTP_EXTRAHEADER",
+                "X-Apm-Safe: value\r\nAuthorization: Basic injected-secret",
+            ),
+            (
+                "GIT_CONFIG_VALUE_0",
+                "X-Apm-Safe: value\nAuthorization: Basic injected-secret",
+            ),
+        ),
+        ids=("direct-header-env", "indexed-config"),
+    )
+    def test_network_env_drops_header_delimiter_injection(
+        self,
+        key: str,
+        value: str,
+    ) -> None:
+        env = {"PATH": os.environ["PATH"], key: value}
+        if key == "GIT_CONFIG_VALUE_0":
+            env.update(
+                {
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "http.extraheader",
+                }
+            )
+
+        child = git_network_env("https://git.example.com/acme/repo", env)
+
+        assert child.get("GIT_HTTP_EXTRAHEADER") is None
+        assert all(
+            "injected-secret" not in config_value
+            for config_key, config_value in child.items()
+            if config_key.startswith("GIT_CONFIG_VALUE_")
+        )
 
     @pytest.mark.parametrize("specific_first", (True, False))
     def test_specific_authorization_overrides_empty_global_header(

@@ -33,6 +33,7 @@ def _authorization_config_values(env: dict[str, str]) -> set[str]:
         env.get(f"GIT_CONFIG_VALUE_{index}", "")
         for index in range(count)
         if "extraheader" in env.get(f"GIT_CONFIG_KEY_{index}", "").lower()
+        and env.get(f"GIT_CONFIG_VALUE_{index}", "").lower().startswith("authorization:")
     }
 
 

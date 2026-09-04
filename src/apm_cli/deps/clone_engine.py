@@ -20,7 +20,6 @@ unit-testable in isolation and mirrors the existing
 
 from __future__ import annotations
 
-import contextlib
 import os
 import subprocess
 from collections.abc import Callable
@@ -240,12 +239,10 @@ class CloneEngine:
                     )
                 )
             if is_ado:
-                return _without_platform_credentials(
-                    host.auth_resolver.build_noninteractive_git_env(
-                        base_env=host.git_env,
-                        host_kind="ado",
-                        preserve_config_isolation=True,
-                    )
+                ado_context = dep_auth_ctx or host.auth_resolver.resolve_for_dep(dep_ref)
+                return host.auth_resolver.git_env_for_remote(
+                    ado_context,
+                    attempt.effective_url or attempt_url,
                 )
             if is_generic and dep_ref is not None:
                 org = repo_url_base.split("/", 1)[0] if "/" in repo_url_base else None
@@ -390,6 +387,69 @@ class CloneEngine:
                 _debug(f"Attempting clone with {attempt.label} (URL sanitized)")
                 if lazy_public_attempt:
                     url, authenticated_fallback_used = _run_public_github_attempt()
+                elif (
+                    is_ado
+                    and attempt.use_token
+                    and dep_auth_scheme == "basic"
+                    and has_token
+                    and dep_auth_ctx is not None
+                ):
+                    from ..utils.git_env import git_subprocess_error_text
+
+                    def _clone_outcome(
+                        attempt_url: str,
+                        attempt_env: dict[str, str],
+                    ) -> tuple[str, str | Exception]:
+                        try:
+                            clone_action(attempt_url, attempt_env, target_path)
+                            return "ok", attempt_url
+                        except (
+                            GitCommandError,
+                            subprocess.CalledProcessError,
+                            subprocess.TimeoutExpired,
+                        ) as clone_exc:
+                            return "err", clone_exc
+
+                    primary_env = _env_for(attempt, url)
+
+                    def _primary_clone(
+                        attempt_url: str = url,
+                        attempt_env: dict[str, str] = primary_env,
+                    ) -> tuple[str, str | Exception]:
+                        return _clone_outcome(attempt_url, attempt_env)
+
+                    def _bearer_clone(bearer: str) -> tuple[str, str | Exception]:
+                        bearer_url = host._build_repo_url(
+                            repo_url_base,
+                            use_ssh=False,
+                            dep_ref=dep_ref,
+                            token=None,
+                            auth_scheme="bearer",
+                        )
+                        bearer_env = host.auth_resolver.build_ado_bearer_git_env(
+                            dep_auth_ctx,
+                            bearer,
+                            bearer_url,
+                            base_env=host.git_env,
+                        )
+                        return _clone_outcome(bearer_url, bearer_env)
+
+                    def _is_auth_failure(outcome: tuple[str, str | Exception]) -> bool:
+                        return outcome[0] == "err" and is_ado_auth_failure_signal(
+                            git_subprocess_error_text(outcome[1])
+                        )
+
+                    fallback = host.auth_resolver.execute_with_bearer_fallback(
+                        dep_ref,
+                        _primary_clone,
+                        _bearer_clone,
+                        _is_auth_failure,
+                    )
+                    outcome = fallback.outcome
+                    if outcome[0] == "err":
+                        raise outcome[1]
+                    url = str(outcome[1])
+                    authenticated_fallback_used = fallback.bearer_attempted
                 else:
                     clone_action(url, _env_for(attempt, url), target_path)
                 if verbose_callback:
@@ -405,64 +465,6 @@ class CloneEngine:
                 subprocess.CalledProcessError,
                 subprocess.TimeoutExpired,
             ) as e:
-                err_msg = str(e)
-                stderr_attr = getattr(e, "stderr", None)
-                if stderr_attr:
-                    if isinstance(stderr_attr, bytes):
-                        with contextlib.suppress(Exception):
-                            err_msg += " " + stderr_attr.decode("utf-8", errors="replace")
-                    else:
-                        err_msg += " " + str(stderr_attr)
-                if (
-                    is_ado
-                    and attempt.use_token
-                    and dep_auth_scheme == "basic"
-                    and has_token
-                    and dep_auth_ctx is not None
-                    and host.auth_resolver._supports_ado_bearer(dep_auth_ctx.host_info.host)
-                    and is_ado_auth_failure_signal(err_msg)
-                ):
-                    try:
-                        from apm_cli.core.azure_cli import (
-                            AzureCliBearerError,
-                            get_bearer_provider,
-                        )
-
-                        provider = get_bearer_provider()
-                        if provider.is_available():
-                            try:
-                                bearer = provider.get_bearer_token()
-                                bearer_url = host._build_repo_url(
-                                    repo_url_base,
-                                    use_ssh=False,
-                                    dep_ref=dep_ref,
-                                    token=None,
-                                    auth_scheme="bearer",
-                                )
-                                bearer_env = host.auth_resolver._build_git_env(
-                                    bearer,
-                                    scheme="bearer",
-                                    host_kind="ado",
-                                    base_env=host.git_env,
-                                )
-                                clone_action(bearer_url, bearer_env, target_path)
-                                host.auth_resolver.emit_stale_pat_diagnostic(
-                                    dep_host or "dev.azure.com"
-                                )
-                                if verbose_callback:
-                                    verbose_callback(
-                                        "Cloned from: (sanitized) via AAD bearer fallback"
-                                    )
-                                return
-                            except (
-                                AzureCliBearerError,
-                                GitCommandError,
-                                subprocess.CalledProcessError,
-                                subprocess.TimeoutExpired,
-                            ):
-                                pass
-                    except ImportError:
-                        pass
                 last_error = e
                 prev_label = attempt.label
                 prev_scheme = attempt.scheme

@@ -154,7 +154,7 @@ def test_resolve_rewrite_uses_longest_matching_prefix() -> None:
         ("ado", "http://dev.azure.com/org/project/_git/repo", False, True),
         ("github", "git@github.com:org/repo.git", True, False),
         ("gitlab", "git@gitlab.com:org/repo.git", True, False),
-        ("ado", "git@ssh.dev.azure.com:v3/org/project/repo", True, False),
+        ("ado", "git@ssh.dev.azure.com:v3/org/project/repo", False, True),
     ],
 )
 def test_git_transport_policy_matrix(

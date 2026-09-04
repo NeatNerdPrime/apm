@@ -49,19 +49,29 @@ from scripts.architecture_linter.models import Rule, Violation
 
 _RID_HOST_CRED = "transport-platform-host-credential-resolution"
 _RID_ADO_VALIDATION = "transport-platform-ado-validation-bearer-fallback"
+_RID_ADO_CLONE_FALLBACK = "transport-platform-ado-validation-clone-bearer-fallback"
+_RID_ADO_HELPER_SUPPRESSION = "transport-platform-ado-validation-helper-suppression"
 _RID_GIT_CHILD_ENV = "transport-platform-git-child-environment"
 _RID_GIT_CLONE_HOOKS = "transport-platform-git-clone-hooks-disabled"
 _RID_GIT_CLONE_TEMPLATES = "transport-platform-git-clone-templates-disabled"
 _RID_GIT_DIAGNOSTIC = "transport-platform-git-diagnostic-redaction"
+_RID_GIT_DIAGNOSTIC_DEBUG = "transport-platform-git-diagnostic-redaction-debug"
 _RID_GIT_DIAGNOSTIC_OWNER = "transport-platform-git-diagnostic-sanitizer-ownership"
+_RID_GIT_DIAGNOSTIC_DELEGATE = "transport-platform-git-diagnostic-sanitizer-ownership-downloader"
 _RID_GIT_DIAGNOSTIC_TOKENS = "transport-platform-git-diagnostic-token-shapes"
+_RID_GIT_DIAGNOSTIC_JWT = "transport-platform-git-diagnostic-token-shapes-jwt"
 _RID_GIT_SINGLE_REMOTE = "transport-platform-git-single-remote-fetch"
 _RID_GIT_URL_CREDENTIALS = "transport-platform-git-url-credentials-out-of-argv"
 _RID_GIT_URL_HEADER = "transport-platform-git-url-header-specificity"
 _RID_GIT_URL_HEADER_FENCE = "transport-platform-git-url-header-specificity-fence"
+_RID_GIT_URL_HEADER_MALFORMED = (
+    "transport-platform-git-url-header-specificity-fence-malformed-values"
+)
+_RID_GIT_URL_HEADER_MANAGED = "transport-platform-git-url-header-specificity-fence-managed-auth"
 _RID_GIT_URL_ENFORCEMENT = "transport-platform-git-url-rewrite-enforcement"
 _RID_GIT_URL_ONCE = "transport-platform-git-url-rewrite-once"
 _RID_GIT_URL_ROUTING = "transport-platform-git-url-rewrite-routing"
+_RID_GIT_URL_VALIDATION_ROUTING = "transport-platform-git-url-rewrite-routing-validation"
 _RID_GIT_URL_REWRITE = "transport-platform-git-url-rewrite-safety"
 _RID_GIT_URL_RECOVERY = "transport-platform-git-url-rewrite-recovery"
 _RID_ARTIFACTORY_NETRC = "transport-platform-artifactory-netrc-isolation"
@@ -130,6 +140,29 @@ def _check_host_credential_resolution(provider: FactsProvider) -> tuple[Violatio
             "AuthResolver must scrub inherited Git authorization state",
         )
     )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_HOST_CRED,
+            _AUTH_OWNER,
+            (
+                'if host_kind == "ado" and not token:',
+                "suppress_credential_helpers = True",
+            ),
+            "AuthResolver must suppress native helpers for every tokenless ADO environment",
+        )
+    )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_HOST_CRED,
+            "src/apm_cli/core/host_providers.py",
+            ('if host_kind == "ado":', "suppress_credential_helpers=True"),
+            "ADO transport policy must reject native credential helpers",
+        )
+    )
     # AC24 -- ADO transport credentials must route through AuthResolver context.
     findings.extend(
         _require_subs(
@@ -179,6 +212,21 @@ def _check_host_credential_resolution(provider: FactsProvider) -> tuple[Violatio
             (
                 "auth_resolver.execute_with_bearer_fallback(",
                 "auth_resolver.build_ado_bearer_git_env(",
+            ),
+        ),
+        (
+            "src/apm_cli/deps/clone_engine.py",
+            (
+                "host.auth_resolver.git_env_for_remote(",
+                "host.auth_resolver.execute_with_bearer_fallback(",
+                "host.auth_resolver.build_ado_bearer_git_env(",
+            ),
+        ),
+        (
+            "src/apm_cli/deps/git_reference_resolver.py",
+            (
+                "host.auth_resolver.git_env_for_remote(",
+                "host.auth_resolver.execute_with_bearer_fallback(",
             ),
         ),
     )
@@ -389,7 +437,8 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 "def git_remote_refs(",
                 "def redact_git_diagnostic(",
                 "github_pat_",
-                "glpat[-_]",
+                "gl(?:agent|cbt|ft|pat|ptt|rt|soat)",
+                "eyJ[A-Za-z0-9_-]",
                 "AZDO",
                 "{52}",
                 "def clear_git_auth_env(",
@@ -401,6 +450,8 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 "snapshot = _merge_parent_git_config_snapshot(",
                 "def _materialize_git_config_snapshot(",
                 "def _build_git_auth_fence(",
+                "def _is_valid_http_extraheader_value(",
+                'if any(character in value for character in ("\\r", "\\n", "\\0")):',
                 "def _urlmatched_header_group(",
                 "def _http_config_scope(",
                 "def _validated_git_url_rewrite_policy(",
@@ -414,6 +465,9 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 '"--get-urlmatch"',
                 "        _build_git_auth_fence(",
                 "intent_snapshot=intent_snapshot",
+                "managed_auth_intent=managed_auth_intent",
+                'env[_MANAGED_GIT_AUTH_INTENT_ENV] = "1"',
+                'managed_auth_intent=env.get(_MANAGED_GIT_AUTH_INTENT_ENV) == "1"',
                 "if not managed and not reset_headers and not helper_reset:",
                 'f"http.{_http_config_scope(auth_fence.remote_url)}.extraheader"',
                 "suppress_helpers=helper_reset or bool(managed)",
@@ -529,6 +583,41 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
                 (path,),
                 pattern,
                 "Raw Git diagnostics must be redacted by utils/git_env.py",
+                exempt=False,
+            )
+        )
+    findings.extend(_check_git_diagnostic_ownership(provider))
+    git_diagnostic_consumers = tuple(
+        path
+        for path in _src_python(provider, exclude={"src/apm_cli/utils/git_env.py"})
+        if path.startswith(
+            (
+                "src/apm_cli/cache/",
+                "src/apm_cli/deps/",
+                "src/apm_cli/marketplace/",
+            )
+        )
+        or path
+        in {
+            "src/apm_cli/commands/marketplace/doctor.py",
+            "src/apm_cli/install/pipeline.py",
+            "src/apm_cli/install/validation.py",
+        }
+    )
+    for pattern in (
+        re.compile(r'print\(f"\[DEBUG\] \{message\}"'),
+        re.compile(r"super\(\).__init__\(result\.stderr"),
+        re.compile(r'f"git show failed: \{stderr\}"'),
+        re.compile(r"git output: \{stderr_text(?:\.strip\(\))?\}"),
+    ):
+        findings.extend(
+            _forbid_scan(
+                provider,
+                inv,
+                _RID_GIT_CHILD_ENV,
+                git_diagnostic_consumers,
+                pattern,
+                "Raw Git stderr and debug rendering must route through utils/git_env.py",
                 exempt=False,
             )
         )
@@ -872,6 +961,102 @@ def _check_git_child_environment(provider: FactsProvider) -> tuple[Violation, ..
             "Git file transport must keep managed credentials out of remote URLs",
         )
     )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_GIT_CHILD_ENV,
+            "src/apm_cli/install/validation.py",
+            (
+                "transport_plan = ado_downloader._transport_selector.select(",
+                "cli_pref=resolved_pref",
+                "allow_fallback=resolved_fallback",
+                "except (GitUrlRewriteError, GitUrlRewriteProbeError):",
+            ),
+            "Positional validation must reuse canonical transport and rewrite policy",
+        )
+    )
+    return tuple(findings)
+
+
+def _check_git_diagnostic_ownership(provider: FactsProvider) -> tuple[Violation, ...]:
+    """Require one redaction owner and only explicit thin compatibility delegates."""
+    findings: list[Violation] = []
+    downloader_path = "src/apm_cli/deps/github_downloader.py"
+    downloader_sanitizers = 0
+    for path in _src_python(provider):
+        _facts, failures = checked_facts(
+            provider,
+            path,
+            _RID_GIT_CHILD_ENV,
+            require_python=True,
+        )
+        if failures:
+            findings.extend(failures)
+            continue
+        index = provider.tree_index(path)
+        if index is None:
+            continue
+        for definition in index.functions():
+            name = getattr(definition, "name", "")
+            if name == "redact_git_diagnostic" and path != "src/apm_cli/utils/git_env.py":
+                findings.append(
+                    violation(
+                        _RID_GIT_CHILD_ENV,
+                        path,
+                        "Git diagnostic redaction must stay owned by utils/git_env.py",
+                        line=definition.lineno,
+                    )
+                )
+                continue
+            if name not in {"sanitize_git_error", "_sanitize_git_error", "_redact_git_stderr"}:
+                continue
+            statements = list(getattr(definition, "body", ()))
+            if (
+                len(statements) == 1
+                and isinstance(statements[0], ast.Expr)
+                and isinstance(statements[0].value, ast.Constant)
+                and statements[0].value.value is Ellipsis
+            ):
+                continue
+            if path == downloader_path and name == "_sanitize_git_error":
+                downloader_sanitizers += 1
+                if (
+                    statements
+                    and isinstance(statements[0], ast.Expr)
+                    and isinstance(statements[0].value, ast.Constant)
+                    and isinstance(statements[0].value.value, str)
+                ):
+                    statements = statements[1:]
+                thin_delegate = (
+                    len(statements) == 1
+                    and isinstance(statements[0], ast.Return)
+                    and isinstance(statements[0].value, ast.Call)
+                    and isinstance(statements[0].value.func, ast.Name)
+                    and statements[0].value.func.id == "redact_git_diagnostic"
+                    and len(statements[0].value.args) == 1
+                    and isinstance(statements[0].value.args[0], ast.Name)
+                    and statements[0].value.args[0].id == "error_message"
+                    and not statements[0].value.keywords
+                )
+                if thin_delegate:
+                    continue
+            findings.append(
+                violation(
+                    _RID_GIT_CHILD_ENV,
+                    path,
+                    "Git diagnostic sanitizers must be thin delegates to utils/git_env.py",
+                    line=definition.lineno,
+                )
+            )
+    if downloader_sanitizers != 1:
+        findings.append(
+            violation(
+                _RID_GIT_CHILD_ENV,
+                downloader_path,
+                "github_downloader must define exactly one thin _sanitize_git_error delegate",
+            )
+        )
     return tuple(findings)
 
 
@@ -1171,7 +1356,12 @@ RULES: tuple[Rule, ...] = (
     Rule(
         id=_RID_HOST_CRED,
         group=GROUP,
-        guard_ids=(_RID_ADO_VALIDATION, _RID_HOST_CRED),
+        guard_ids=(
+            _RID_ADO_VALIDATION,
+            _RID_ADO_CLONE_FALLBACK,
+            _RID_ADO_HELPER_SUPPRESSION,
+            _RID_HOST_CRED,
+        ),
         description="Host + credential resolution stays owned by core/auth.py (AuthResolver).",
         check=_check_host_credential_resolution,
     ),
@@ -1183,15 +1373,21 @@ RULES: tuple[Rule, ...] = (
             _RID_GIT_CLONE_HOOKS,
             _RID_GIT_CLONE_TEMPLATES,
             _RID_GIT_DIAGNOSTIC,
+            _RID_GIT_DIAGNOSTIC_DEBUG,
             _RID_GIT_DIAGNOSTIC_OWNER,
+            _RID_GIT_DIAGNOSTIC_DELEGATE,
             _RID_GIT_DIAGNOSTIC_TOKENS,
+            _RID_GIT_DIAGNOSTIC_JWT,
             _RID_GIT_SINGLE_REMOTE,
             _RID_GIT_URL_CREDENTIALS,
             _RID_GIT_URL_HEADER,
             _RID_GIT_URL_HEADER_FENCE,
+            _RID_GIT_URL_HEADER_MALFORMED,
+            _RID_GIT_URL_HEADER_MANAGED,
             _RID_GIT_URL_ENFORCEMENT,
             _RID_GIT_URL_ONCE,
             _RID_GIT_URL_ROUTING,
+            _RID_GIT_URL_VALIDATION_ROUTING,
             _RID_GIT_URL_RECOVERY,
             _RID_GIT_URL_REWRITE,
         ),

@@ -26,6 +26,7 @@ import requests
 from ..core.auth import AuthResolver, HostInfo
 from ..models.apm_package import DependencyReference
 from ..utils.archive import ArchiveError, safe_extract_zip
+from ..utils.git_env import redact_git_diagnostic
 from ..utils.github_host import (
     build_ado_api_url,
     build_artifactory_archive_url,
@@ -55,7 +56,7 @@ from .host_backends import backend_for
 def _debug(message: str) -> None:
     """Print debug message if APM_DEBUG environment variable is set."""
     if os.environ.get("APM_DEBUG"):
-        print(f"[DEBUG] {message}", file=sys.stderr)
+        print(f"[DEBUG] {redact_git_diagnostic(message)}", file=sys.stderr)
 
 
 def _close_response(response: requests.Response, context: str) -> None:

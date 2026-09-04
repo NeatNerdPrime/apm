@@ -70,6 +70,9 @@ from apm_cli.install.package_resolution import (
     try_update_existing_dependency_entry,
     user_scope_rejection_reason,
 )
+from apm_cli.install.package_selection import (
+    existing_dependency_identities as _check_package_conflicts,
+)
 from apm_cli.install.package_selection import only_packages_from_validation
 
 # Re-export local-content leaf helpers so that callers inside this module
@@ -229,35 +232,6 @@ except ImportError as e:
     _ScopedInstallDependencyResolver = None  # type: ignore[misc,assignment]
 
 
-# ---------------------------------------------------------------------------
-# Package validation helpers (extracted from _validate_and_add_packages_to_apm_yml)
-# ---------------------------------------------------------------------------
-
-
-def _check_package_conflicts(current_deps):
-    """Build identity set from existing deps for duplicate detection.
-
-    Parses each entry in *current_deps* (string or dict form) through
-    :class:`DependencyReference` and collects identity strings.
-
-    Returns:
-        ``set`` of identity strings for existing dependencies.
-    """
-    existing_identities = builtins.set()
-    for dep_entry in current_deps:
-        try:
-            if isinstance(dep_entry, str):
-                ref = DependencyReference.parse(dep_entry)
-            elif isinstance(dep_entry, builtins.dict):
-                ref = DependencyReference.parse_from_dict(dep_entry)
-            else:
-                continue
-            existing_identities.add(ref.get_identity())
-        except (ValueError, TypeError, AttributeError, KeyError):
-            continue
-    return existing_identities
-
-
 def _resolve_package_references(
     packages,
     current_deps,
@@ -272,6 +246,8 @@ def _resolve_package_references(
     default_registry=None,
     dry_run=False,
     updated_packages_out=None,
+    protocol_pref=None,
+    allow_protocol_fallback: bool | None = None,
 ):
     """Validate, canonicalize, and resolve package references.
 
@@ -464,13 +440,24 @@ def _resolve_package_references(
         elif is_git_semver_resolution_eligible(dep_ref):
             package_accessible = True
         else:
-            package_accessible = _validate_package_exists(
-                package,
-                verbose=verbose,
-                auth_resolver=auth_resolver,
-                logger=logger,
-                dep_ref=dep_ref,
-            )
+            from ..utils.git_env import GitUrlRewriteError, GitUrlRewriteProbeError
+
+            try:
+                package_accessible = _validate_package_exists(
+                    package,
+                    verbose=verbose,
+                    auth_resolver=auth_resolver,
+                    logger=logger,
+                    dep_ref=dep_ref,
+                    protocol_pref=protocol_pref,
+                    allow_protocol_fallback=allow_protocol_fallback,
+                )
+            except (GitUrlRewriteError, GitUrlRewriteProbeError) as exc:
+                reason = str(exc)
+                invalid_outcomes.append((package, reason))
+                if logger:
+                    logger.validation_fail(package, reason)
+                continue
         if package_accessible:
             updates_existing_entry, update_error = try_update_existing_dependency_entry(
                 current_deps,
@@ -588,6 +575,8 @@ def _validate_and_add_packages_to_apm_yml(
     allow_insecure=False,
     skill_subset=None,
     skill_subset_from_cli=False,
+    protocol_pref=None,
+    allow_protocol_fallback: bool | None = None,
 ):
     """Validate packages exist and can be accessed, then add to apm.yml dependencies section.
 
@@ -658,6 +647,8 @@ def _validate_and_add_packages_to_apm_yml(
         default_registry=_default_registry_for_cli,
         dry_run=dry_run,
         updated_packages_out=updated_packages,
+        protocol_pref=protocol_pref,
+        allow_protocol_fallback=allow_protocol_fallback,
     )
 
     prospective_package = None
@@ -1522,6 +1513,8 @@ def install(  # noqa: C901, PLR0913
                 allow_insecure=allow_insecure,
                 skill_subset=_skill_subset,
                 skill_subset_from_cli=bool(skill_names),
+                protocol_pref=protocol_pref,
+                allow_protocol_fallback=allow_protocol_fallback,
             )
             transaction.record_validation(outcome)
             command_result = transaction.validation_result()

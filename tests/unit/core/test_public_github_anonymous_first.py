@@ -461,6 +461,7 @@ def test_public_github_connectivity_and_throttle_failures_never_resolve(
         (RuntimeError("remote: Repository not found"), True),
         (RuntimeError("terminal prompts disabled"), True),
         (RuntimeError("unable to get password from user"), True),
+        (RuntimeError("fatal: unable to get password for user"), True),
         (RuntimeError("The requested URL returned error: 404"), True),
         (RuntimeError("HTTP error 403"), True),
         (RuntimeError("status code=401"), True),

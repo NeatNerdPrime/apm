@@ -61,7 +61,7 @@ def test_partial_clone_warning_redacts_url_credentials() -> None:
     parsed = urlparse(rendered_url)
 
     assert parsed.hostname == "github.com"
-    assert parsed.username is None
+    assert parsed.username == "***"
     assert parsed.password is None
 
 

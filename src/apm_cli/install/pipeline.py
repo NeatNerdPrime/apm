@@ -125,6 +125,7 @@ def _preflight_auth_check(ctx, auth_resolver, verbose: bool) -> None:
     """
     import subprocess as _sp
 
+    from ..utils.git_env import redact_git_diagnostic
     from ..utils.github_host import (
         is_ado_auth_failure_signal,
         is_azure_devops_hostname,
@@ -284,7 +285,7 @@ def _preflight_auth_check(ctx, auth_resolver, verbose: bool) -> None:
                         f"    Ensure your SSH key is loaded in ssh-agent "
                         f"(ssh-add -l) and that the\n"
                         f"    public key is authorised on the server.\n\n"
-                        f"    git output: {stderr_text.strip()}\n\n"
+                        f"    git output: {redact_git_diagnostic(stderr_text.strip())}\n\n"
                         f"    No files were modified.\n"
                         f"    apm.yml, apm.lock.yaml, and apm_modules/ are unchanged."
                     ),

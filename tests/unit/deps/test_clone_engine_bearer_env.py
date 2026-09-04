@@ -6,10 +6,14 @@ import subprocess as sp
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from apm_cli.core.auth import AuthResolver
+from apm_cli.core.auth import AuthContext, AuthResolver, HostInfo
 from apm_cli.deps.clone_engine import CloneEngine
 from apm_cli.deps.transport_selection import TransportAttempt, TransportPlan
 from apm_cli.models.dependency.reference import DependencyReference
+from tests.utils.git_credential_sentinel import (
+    credential_helper_trap_env,
+    exercise_credential_helper,
+)
 
 
 def _ado_host(git_env: dict) -> MagicMock:
@@ -29,6 +33,11 @@ def _ado_host(git_env: dict) -> MagicMock:
     ctx.git_env = {}
     ctx.host_info.kind = "ado"
     host._resolve_dep_auth_ctx.return_value = ctx
+    resolver_impl = AuthResolver()
+    host.auth_resolver.execute_with_bearer_fallback.side_effect = (
+        resolver_impl.execute_with_bearer_fallback
+    )
+    host.auth_resolver.build_ado_bearer_git_env.side_effect = resolver_impl.build_ado_bearer_git_env
     host.auth_resolver.git_env_for_context.side_effect = AuthResolver.git_env_for_context
     host.auth_resolver._build_git_env.side_effect = AuthResolver._build_git_env
     host._build_repo_url = MagicMock(
@@ -188,3 +197,47 @@ def test_gitlab_rewrite_uses_effective_transport_credential_policy(tmp_path: Pat
 
     host.auth_resolver.git_env_for_remote.assert_called_with(context, effective)
     assert seen_envs == [{"CLEAN": "1"}]
+
+
+def test_tokenless_ado_clone_never_invokes_native_credential_helper(tmp_path: Path) -> None:
+    """CloneEngine routes a tokenless ADO attempt through the resolver fence."""
+    base_env, marker = credential_helper_trap_env(tmp_path)
+    resolver = AuthResolver()
+    dep = DependencyReference.parse("dev.azure.com/org/project/_git/repo#main")
+    context = AuthContext(
+        token=None,
+        source="none",
+        token_type="unknown",
+        host_info=HostInfo(
+            host="dev.azure.com",
+            kind="ado",
+            has_public_repos=False,
+            api_base="https://dev.azure.com",
+        ),
+        git_env={},
+    )
+    host = _ado_host(base_env)
+    host.auth_resolver = resolver
+    host._resolve_dep_token.return_value = None
+    host._resolve_dep_auth_ctx.return_value = context
+    host._transport_selector.select.return_value = TransportPlan(
+        attempts=[TransportAttempt(scheme="https", label="plain HTTPS", use_token=False)],
+        strict=True,
+    )
+    host._build_repo_url.return_value = "https://dev.azure.com/org/project/_git/repo"
+
+    def clone_action(_url: str, env: dict[str, str], _target: Path) -> None:
+        exercise_credential_helper(
+            env,
+            host="dev.azure.com",
+            path="org/project/_git/repo",
+        )
+
+    CloneEngine(host).execute(
+        dep.repo_url,
+        tmp_path / "clone",
+        dep_ref=dep,
+        clone_action=clone_action,
+    )
+
+    assert not marker.exists()

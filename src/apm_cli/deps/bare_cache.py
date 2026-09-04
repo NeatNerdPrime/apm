@@ -866,7 +866,21 @@ def build_clone_failure_message(
             error_msg += plan.fallback_hint + " "
     else:
         error_msg = f"Failed to clone repository {repo_url_base} using all available methods. "
-    if is_ado and not has_ado_token:
+    effective_scheme = last_attempt_scheme
+    for attempt in reversed(plan.attempts):
+        if attempt.scheme != last_attempt_scheme:
+            continue
+        effective_url = getattr(attempt, "effective_url", None)
+        if isinstance(effective_url, str) and effective_url:
+            effective_scheme = urlsplit(effective_url).scheme.lower()
+            break
+    if effective_scheme == "file":
+        error_msg += (
+            "The configured local Git mirror failed. Verify that its path exists "
+            "and is readable, then inspect the matching rule with "
+            "'git config --show-origin --get-regexp ^url\\..*\\.insteadOf$'."
+        )
+    elif is_ado and not has_ado_token:
         host = dep_host or "dev.azure.com"
         error_msg += auth_resolver.build_error_context(
             host,
@@ -876,34 +890,19 @@ def build_clone_failure_message(
             dep_url=dep_ref.repo_url if dep_ref else None,
         )
     elif is_generic:
-        effective_scheme = last_attempt_scheme
-        for attempt in reversed(plan.attempts):
-            if attempt.scheme != last_attempt_scheme:
-                continue
-            effective_url = getattr(attempt, "effective_url", None)
-            if isinstance(effective_url, str) and effective_url:
-                effective_scheme = urlsplit(effective_url).scheme.lower()
-                break
-        if effective_scheme == "file":
-            error_msg += (
-                "The configured local Git mirror failed. Verify that its path exists "
-                "and is readable, then inspect the matching rule with "
-                "'git config --show-origin --get-regexp ^url\\..*\\.insteadOf$'."
+        if dep_host:
+            host_info = auth_resolver.classify_host(
+                dep_host,
+                port=dep_ref.port if dep_ref else None,
             )
+            host_name = host_info.display_name
         else:
-            if dep_host:
-                host_info = auth_resolver.classify_host(
-                    dep_host,
-                    port=dep_ref.port if dep_ref else None,
-                )
-                host_name = host_info.display_name
-            else:
-                host_name = "the target host"
-            error_msg += (
-                f"For private repositories on {host_name}, configure SSH keys or a git "
-                "credential helper. APM delegates authentication to git for "
-                "non-GitHub/ADO hosts."
-            )
+            host_name = "the target host"
+        error_msg += (
+            f"For private repositories on {host_name}, configure SSH keys or a git "
+            "credential helper. APM delegates authentication to git for "
+            "non-GitHub/ADO hosts."
+        )
     elif (
         configured_github_host
         and dep_host

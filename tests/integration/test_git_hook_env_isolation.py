@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import shlex
 import subprocess
@@ -15,6 +16,7 @@ import pytest
 
 from apm_cli.cache.git_cache import GitCache
 from apm_cli.cache.url_normalize import cache_shard_key
+from apm_cli.core.auth import AuthResolver
 from apm_cli.deps.bare_cache import (
     bare_clone_with_fallback,
     clone_with_fallback,
@@ -30,6 +32,15 @@ from apm_cli.utils.git_env import (
     get_git_executable,
     git_subprocess_env,
 )
+from tests.integration.test_marketplace_generic_https_credential_lifecycle import (
+    _configure_git_https_fixture,
+    _git_exec_path,
+    _real_git,
+    _write_tls_certificate,
+)
+from tests.utils.isolated_apm_environment import IsolatedApmEnvironment
+from tests.utils.local_git_http_server import LocalGitHttpServerFactory
+from tests.utils.local_git_repository import LocalGitRepositoryFactory
 
 pytestmark = pytest.mark.component
 
@@ -50,6 +61,224 @@ def _commit(repo: Path, content: str, message: str) -> str:
     _git(repo, "add", "payload.txt")
     _git(repo, "commit", "-m", message)
     return _git(repo, "rev-parse", "HEAD")
+
+
+def _https_git_fixture(
+    tmp_path: Path,
+) -> tuple[
+    IsolatedApmEnvironment,
+    dict[str, str],
+    LocalGitRepositoryFactory,
+    object,
+    LocalGitHttpServerFactory,
+    Path,
+    Path,
+]:
+    """Create one repository and the material needed for a real HTTPS server."""
+    isolated = IsolatedApmEnvironment.create(tmp_path / "https-fixture", base_env=os.environ)
+    environment = isolated.subprocess_env()
+    environment["GIT_ALLOW_PROTOCOL"] = "file:http:https"
+    environment["GIT_EXEC_PATH"] = _git_exec_path(_real_git())
+    repositories = LocalGitRepositoryFactory(isolated.repository_root, env=environment)
+    repository = repositories.create("auth-fence")
+    (repository.worktree / "README.md").write_text("# Auth fence fixture\n", encoding="ascii")
+    repositories.commit(repository, message="seed auth fence")
+    certificate, key = _write_tls_certificate(isolated.root)
+    server_factory = LocalGitHttpServerFactory(
+        isolated.repository_root,
+        real_git=_real_git(),
+        env=environment,
+    )
+    return (
+        isolated,
+        environment,
+        repositories,
+        repository,
+        server_factory,
+        certificate,
+        key,
+    )
+
+
+def _add_git_config(config: Path, key: str, value: str) -> None:
+    subprocess.run(
+        (
+            str(_real_git()),
+            "config",
+            "--file",
+            str(config),
+            "--add",
+            key,
+            value,
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_real_https_anonymous_fence_drops_injected_ambient_header(tmp_path: Path) -> None:
+    """A malformed safe-looking extraHeader cannot inject Authorization."""
+    (
+        isolated,
+        environment,
+        _repositories,
+        repository,
+        server_factory,
+        certificate,
+        key,
+    ) = _https_git_fixture(tmp_path)
+    config = Path(environment["GIT_CONFIG_GLOBAL"])
+
+    with server_factory.start(
+        (repository,),
+        password="unused",
+        certfile=certificate,
+        keyfile=key,
+    ) as server:
+        _configure_git_https_fixture(
+            _real_git(),
+            remote_base_url=server.proxy_url,
+            config_paths=(config,),
+        )
+        _add_git_config(
+            config,
+            "http.extraHeader",
+            "X-Apm-Safe: value\r\nAuthorization: Basic injected-secret",
+        )
+        clone_git_worktree(
+            server.remote_url(repository),
+            isolated.work_root / "anonymous-clone",
+            env=environment,
+        )
+        observations = server.observations
+
+    assert observations
+    assert {observation.authorization for observation in observations} == {None}
+
+
+def test_real_https_managed_fence_keeps_only_intended_authorization(tmp_path: Path) -> None:
+    """Malformed ambient headers are dropped before managed auth is reattached."""
+    (
+        isolated,
+        environment,
+        _repositories,
+        repository,
+        server_factory,
+        certificate,
+        key,
+    ) = _https_git_fixture(tmp_path)
+    config = Path(environment["GIT_CONFIG_GLOBAL"])
+    token = "managed-fixture-token"
+    expected = "Basic " + base64.b64encode(f"x-access-token:{token}".encode("ascii")).decode(
+        "ascii"
+    )
+
+    with server_factory.start(
+        (repository,),
+        password=token,
+        private_repositories=(repository,),
+        certfile=certificate,
+        keyfile=key,
+    ) as server:
+        _configure_git_https_fixture(
+            _real_git(),
+            remote_base_url=server.proxy_url,
+            config_paths=(config,),
+        )
+        _add_git_config(
+            config,
+            "http.extraHeader",
+            "X-Apm-Safe: value\nAuthorization: Basic injected-secret",
+        )
+        managed_env = AuthResolver._build_git_env(
+            token,
+            host_kind="github",
+            base_env=environment,
+        )
+        clone_git_worktree(
+            server.remote_url(repository),
+            isolated.work_root / "managed-clone",
+            env=managed_env,
+        )
+        observations = server.observations
+
+    assert observations
+    assert {observation.authorization for observation in observations} == {expected}
+
+
+def test_real_https_managed_auth_rejects_cross_port_rewrite_before_request(
+    tmp_path: Path,
+) -> None:
+    """A target-scoped empty header cannot hide a managed cross-port rewrite."""
+    (
+        isolated,
+        environment,
+        _repositories,
+        repository,
+        server_factory,
+        certificate,
+        key,
+    ) = _https_git_fixture(tmp_path)
+    second_factory = LocalGitHttpServerFactory(
+        isolated.repository_root,
+        real_git=_real_git(),
+        env=environment,
+    )
+    config = Path(environment["GIT_CONFIG_GLOBAL"])
+    token = "managed-cross-port-token"
+
+    with (
+        server_factory.start(
+            (repository,),
+            password=token,
+            private_repositories=(repository,),
+            certfile=certificate,
+            keyfile=key,
+        ) as source,
+        second_factory.start(
+            (repository,),
+            password=token,
+            private_repositories=(repository,),
+            certfile=certificate,
+            keyfile=key,
+        ) as target,
+    ):
+        _configure_git_https_fixture(
+            _real_git(),
+            remote_base_url=source.proxy_url,
+            config_paths=(config,),
+        )
+        _configure_git_https_fixture(
+            _real_git(),
+            remote_base_url=target.proxy_url,
+            config_paths=(config,),
+        )
+        _add_git_config(
+            config,
+            f"url.{target.proxy_url}/.insteadOf",
+            f"{source.proxy_url}/",
+        )
+        _add_git_config(
+            config,
+            f"http.{target.proxy_url}/.extraHeader",
+            "",
+        )
+        managed_env = AuthResolver._build_git_env(
+            token,
+            host_kind="github",
+            base_env=environment,
+        )
+
+        with pytest.raises(GitUrlRewriteError, match="different HTTPS origin"):
+            clone_git_worktree(
+                source.remote_url(repository),
+                isolated.work_root / "cross-port-clone",
+                env=managed_env,
+            )
+
+        assert source.observations == ()
+        assert target.observations == ()
 
 
 def test_cache_refresh_ignores_linked_worktree_git_environment(tmp_path: Path) -> None:

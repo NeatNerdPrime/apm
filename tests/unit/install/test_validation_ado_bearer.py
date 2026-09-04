@@ -62,7 +62,7 @@ def _make_resolver(auth_ctx=None):
         ctx,
         base_env=ctx.git_env,
     )
-    resolver.build_ado_bearer_git_env.side_effect = lambda _ctx, bearer, _url: (
+    resolver.build_ado_bearer_git_env.side_effect = lambda _ctx, bearer, _url, **_kwargs: (
         AuthResolver._build_git_env(
             bearer,
             scheme="bearer",

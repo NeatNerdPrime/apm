@@ -569,6 +569,8 @@ class AuthResolver:
                 "repository not found",
                 "terminal prompts disabled",
                 "unable to get password from user",
+                "unable to get password",
+                "could not read password",
             )
         ):
             return True
@@ -1251,6 +1253,13 @@ class AuthResolver:
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GIT_ASKPASS"] = "echo"
         env.update(_GIT_MESSAGE_LOCALE_ENV)
+        if host_kind == "ado" and not token:
+            from ..deps.git_auth_env import GitAuthEnvBuilder
+
+            env["GIT_CONFIG_NOSYSTEM"] = "1"
+            env["GIT_CONFIG_GLOBAL"] = GitAuthEnvBuilder.isolated_global_config_path()
+            AuthResolver._append_git_config(env, "credential.helper", "")
+            AuthResolver._append_git_config(env, "http.extraheader", "")
         github_kinds = {"github", "ghe_cloud", "ghes"}
         header_auth = host_kind in {"ado", "gitlab", *github_kinds} or scheme == "github-basic"
         if token and header_auth and scheme in {"basic", "bearer", "github-basic"}:
@@ -1295,6 +1304,9 @@ class AuthResolver:
         """Build a credential-free Git environment from caller-owned config."""
         from ..deps.git_auth_env import GitAuthEnvBuilder
 
+        if host_kind == "ado":
+            preserve_config_isolation = True
+            suppress_credential_helpers = True
         env = cls._build_git_env(
             None,
             host_kind=host_kind,
@@ -1394,7 +1406,13 @@ class AuthResolver:
             base_env=self.hardened_git_base_env(),
         )
 
-    def git_env_for_remote(self, ctx: AuthContext, remote_url: str) -> dict[str, str]:
+    def git_env_for_remote(
+        self,
+        ctx: AuthContext,
+        remote_url: str,
+        *,
+        base_env: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         """Build the canonical noninteractive Git environment for one remote.
 
         Host and transport policy belongs to the provider registry. This method
@@ -1402,10 +1420,10 @@ class AuthResolver:
         marketplace and dependency consumers from branching on transport.
         """
         policy = git_transport_policy(ctx.host_info.kind, remote_url)
-        base_env = self.hardened_git_base_env()
+        base_env = self.hardened_git_base_env() if base_env is None else dict(base_env)
         if policy.use_resolved_credentials:
             env = self.git_env_for_context(ctx, base_env=base_env)
-            if not ctx.token:
+            if not ctx.token and ctx.host_info.kind != "ado":
                 self._append_git_config(env, "credential.helper", "")
                 self._append_git_config(env, "http.extraheader", "")
         else:
@@ -1436,6 +1454,8 @@ class AuthResolver:
         ctx: AuthContext,
         bearer_token: str,
         remote_url: str,
+        *,
+        base_env: dict[str, str] | None = None,
     ) -> dict[str, str]:
         """Build the managed Git environment for an ADO bearer retry."""
         if ctx.host_info.kind != "ado":
@@ -1448,7 +1468,7 @@ class AuthResolver:
             git_env={},
             auth_scheme="bearer",
         )
-        return self.git_env_for_remote(bearer_ctx, remote_url)
+        return self.git_env_for_remote(bearer_ctx, remote_url, base_env=base_env)
 
     def build_native_git_credential_env(
         self,

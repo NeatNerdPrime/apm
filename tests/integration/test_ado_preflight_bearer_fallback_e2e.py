@@ -280,8 +280,31 @@ def test_preflight_still_raises_when_both_pat_and_bearer_fail(tmp_path, monkeypa
     bin_dir.mkdir()
 
     fake_git_always_401 = """#!/usr/bin/env python3
+import os
 import sys
-if sys.argv[1:2] == ["ls-remote"]:
+argv = sys.argv[1:]
+if "config" in argv and "--list" in argv:
+    count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    fields = b"".join(
+        f"command\\0{key}\\n{value}\\0".encode()
+        for index in range(count)
+        for key in [os.environ.get(f"GIT_CONFIG_KEY_{index}", "")]
+        for value in [os.environ.get(f"GIT_CONFIG_VALUE_{index}", "")]
+        if key
+    )
+    os.write(1, fields)
+    sys.exit(0)
+if "config" in argv and "--get-urlmatch" in argv:
+    values = [
+        os.environ.get(f"GIT_CONFIG_VALUE_{index}", "")
+        for index in range(int(os.environ.get("GIT_CONFIG_COUNT", "0")))
+        if os.environ.get(f"GIT_CONFIG_KEY_{index}", "").lower() == "http.extraheader"
+    ]
+    if values:
+        os.write(1, (values[-1] + "\\0").encode())
+        sys.exit(0)
+    sys.exit(1)
+if argv[:1] == ["ls-remote"]:
     sys.stderr.write(
         "fatal: Authentication failed for "
         "'https://dev.azure.com/myorg/myproject/_git/myrepo'\\n"
