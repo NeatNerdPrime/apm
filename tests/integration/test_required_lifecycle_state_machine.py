@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import pytest
 
 from apm_cli.deps.lockfile import LockFile
+from apm_cli.integration.targets import KNOWN_TARGETS
 from apm_cli.utils.yaml_io import dump_yaml, load_yaml
 from tests.utils.apm_lifecycle_runner import ApmLifecycleRunner, CommandResult
 from tests.utils.isolated_apm_environment import IsolatedApmEnvironment
-from tests.utils.lifecycle_state import LifecycleStateSnapshot
+from tests.utils.lifecycle_state import LifecycleStateRoot, LifecycleStateSnapshot
 from tests.utils.local_git_repository import (
     GitCommit,
     LocalGitRepository,
@@ -32,8 +35,27 @@ pytestmark = [
 
 _OWNER = "apm-fixture-org"
 _AUDIT_ARGS = ("audit", "--ci", "--no-policy", "--format", "json")
+_AUDIT_ALL_ARGS = ("audit", "--ci", "--no-policy", "--no-fail-fast", "--format", "json")
 _INSTALL_ARGS = ("install", "--no-policy", "--parallel-downloads", "0")
 _LOCK_ARGS = ("lock", "--no-policy", "--parallel-downloads", "0")
+_EXTERNAL_USER_ROOT_ENV = {
+    "claude": "CLAUDE_CONFIG_DIR",
+    "hermes": "HERMES_HOME",
+}
+_GLOBAL_AUDIT_RULES = frozenset(
+    {
+        "config-consistency",
+        "content-integrity",
+        "deployed-files-present",
+        "deployment-ledger-owners",
+        "drift",
+        "includes-consent",
+        "lockfile-exists",
+        "no-orphaned-packages",
+        "ref-consistency",
+        "skill-subset-consistency",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -210,6 +232,112 @@ def _audit(
     return result, payload
 
 
+def _audit_at(
+    scenario: _Scenario,
+    cwd: Path,
+    *,
+    environment: dict[str, str],
+    expected_returncode: int = 0,
+    scenario_id: str,
+) -> tuple[CommandResult, dict[str, object]]:
+    result = scenario.runner.run(
+        _AUDIT_ALL_ARGS,
+        scenario_id=scenario_id,
+        cwd=cwd,
+        env=environment,
+    )
+    assert result.returncode == expected_returncode, _result_evidence(result)
+    payload = json.loads(result.stdout)
+    assert isinstance(payload, dict)
+    return result, payload
+
+
+def _check(payload: dict[str, object], name: str) -> dict[str, object]:
+    checks = _checks(payload)
+    if name in checks:
+        return checks[name]
+    raise AssertionError(f"Missing audit check {name!r}")
+
+
+def _checks(payload: dict[str, object]) -> dict[str, dict[str, object]]:
+    checks = payload["checks"]
+    assert isinstance(checks, list)
+    by_name: dict[str, dict[str, object]] = {}
+    for check in checks:
+        assert isinstance(check, dict)
+        name = check["name"]
+        assert isinstance(name, str)
+        by_name[name] = check
+    return by_name
+
+
+def _assert_global_audit_rules(
+    payload: dict[str, object],
+    *,
+    failed: set[str] | frozenset[str],
+) -> None:
+    checks = _checks(payload)
+    assert set(checks) == _GLOBAL_AUDIT_RULES
+    actual_failed = {name for name, check in checks.items() if check["passed"] is False}
+    assert actual_failed == failed
+    assert payload["passed"] is (not failed)
+    summary = payload["summary"]
+    assert isinstance(summary, dict)
+    assert summary["total"] == len(_GLOBAL_AUDIT_RULES)
+    assert summary["failed"] == len(failed)
+    assert summary["passed"] == len(_GLOBAL_AUDIT_RULES) - len(failed)
+    for name in _GLOBAL_AUDIT_RULES - failed:
+        assert checks[name]["passed"] is True, name
+
+
+def _drift_kinds_for(
+    payload: dict[str, object],
+    expected_paths: set[str],
+) -> set[tuple[str, str]]:
+    drift = payload["drift"]
+    assert isinstance(drift, dict)
+    entries = drift["drift"]
+    assert isinstance(entries, list)
+    return {
+        (entry["path"], entry["kind"])
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("path") in expected_paths
+    }
+
+
+def _skill_deploy_path(target: str, skill_name: str) -> str:
+    mapping = KNOWN_TARGETS[target].primitives["skills"]
+    suffix = PurePosixPath(mapping.extension.lstrip("/"))
+    return (PurePosixPath(mapping.subdir) / skill_name / suffix).as_posix()
+
+
+def _external_root_specs(
+    roots: Mapping[str, Path],
+    *,
+    config_paths: Mapping[str, tuple[PurePosixPath, ...]],
+) -> tuple[LifecycleStateRoot, ...]:
+    return tuple(
+        LifecycleStateRoot(
+            root_id=f"{target}-home",
+            target=target,
+            scope="user",
+            path=root,
+            config_paths=config_paths.get(target, ()),
+        )
+        for target, root in sorted(roots.items())
+    )
+
+
+def _apm_home_root(scenario: _Scenario) -> LifecycleStateRoot:
+    return LifecycleStateRoot(
+        root_id="apm-home",
+        target="copilot",
+        scope="user",
+        path=scenario.isolated.config_root,
+        config_paths=(PurePosixPath("apm.yml"), PurePosixPath("apm.lock.yaml")),
+    )
+
+
 def _deployment_paths(snapshot: LifecycleStateSnapshot) -> set[str]:
     return {record.locator.value for record in snapshot.deployment_records}
 
@@ -244,6 +372,68 @@ def _assert_same_state(
     assert actual.semantic_bytes == expected.semantic_bytes, "semantic state diverged"
 
 
+def test_required_lsp_only_dry_run_reports_plan_without_writing_state(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """Real CLI dry-run proof for LSP-only manifests."""
+    scenario = _new_scenario(tmp_path / "lsp-only-dry-run", apm_binary_path)
+    project = scenario.consumers.create(
+        "lsp-only-consumer",
+        lsp_dependencies=(
+            "typescript-language-server",
+            {
+                "name": "pyright",
+                "command": "pyright-langserver",
+                "extensionToLanguage": {".py": "python"},
+            },
+        ),
+        targets=("claude", "copilot"),
+    )
+    capture_args = {
+        "targets": ("claude", "copilot"),
+        "config_paths": (
+            PurePosixPath("apm_modules"),
+            PurePosixPath(".github/lsp.json"),
+            PurePosixPath(".claude/skills/apm-lsp/.claude-plugin/plugin.json"),
+        ),
+        "external_roots": (
+            LifecycleStateRoot(
+                root_id="apm-home",
+                target="claude",
+                scope="user",
+                path=scenario.isolated.config_root,
+                config_paths=(
+                    PurePosixPath("apm.yml"),
+                    PurePosixPath("config.json"),
+                ),
+            ),
+        ),
+    }
+    before = LifecycleStateSnapshot.capture(project.root, **capture_args)
+
+    result = _run_success(
+        scenario,
+        project,
+        (*_INSTALL_ARGS, "--dry-run"),
+        environment=scenario.environment,
+        scenario_id="lsp-only-dry-run-install",
+    )
+    after = LifecycleStateSnapshot.capture(project.root, **capture_args)
+
+    assert "LSP servers to configure (2):" in result.stdout
+    assert "typescript-language-server" in result.stdout
+    assert "pyright" in result.stdout
+    assert "No dependencies found" not in result.stdout
+    assert after.lockfile_bytes is None
+    assert after.file("apm_modules").kind == "missing"
+    assert after.file(".github/lsp.json").kind == "missing"
+    assert after.file(".claude/skills/apm-lsp/.claude-plugin/plugin.json").kind == "missing"
+    assert after.file("apm.yml", root_id="apm-home").kind == "missing"
+    assert after.file("config.json", root_id="apm-home").kind == "missing"
+    _assert_same_state(before, after)
+
+
 def _hook_commands(settings_path: Path) -> list[str]:
     if not settings_path.exists():
         return []
@@ -255,6 +445,99 @@ def _hook_commands(settings_path: Path) -> list[str]:
             if isinstance(command, str):
                 commands.append(command)
     return commands
+
+
+def test_required_hybrid_manifest_installs_as_apm_package_through_cli_state_machine(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    scenario = _new_scenario(tmp_path / "hybrid-precedence", apm_binary_path)
+    source = _publish(
+        scenario,
+        "hybrid-apm-kit",
+        instruction="authoritative",
+    )
+    (source.repository.worktree / "plugin.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name": "hybrid.agent.plugin",
+                "version": "1.0.0",
+                "description": "Competing Agent Plugin fixture",
+                "author": {"name": "APM Test"},
+                "license": "MIT",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (source.repository.worktree / ".claude-plugin").mkdir()
+    source_commit = scenario.repositories.commit(
+        source.repository,
+        message="add competing plugin surfaces",
+    )
+    dependency = dict(source.dependency)
+    dependency["ref"] = source_commit.sha
+    consumer = scenario.consumers.create(
+        "hybrid-precedence-consumer",
+        dependencies=(dependency,),
+        targets=("copilot",),
+    )
+    deployed_instruction = ".github/instructions/authoritative.instructions.md"
+    capture_args = {
+        "targets": ("copilot",),
+        "config_paths": (PurePosixPath(deployed_instruction),),
+    }
+    before_install = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+
+    install_result = _run_success(
+        scenario,
+        consumer,
+        _INSTALL_ARGS,
+        environment=source.environment,
+        scenario_id="hybrid-precedence-install",
+    )
+    after_install = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+    _lockfile, locked_dep = _single_locked_dependency(consumer.root)
+
+    assert install_result.command == (str(apm_binary_path), *_INSTALL_ARGS)
+    assert before_install.file(deployed_instruction).kind == "missing"
+    assert (
+        after_install.file(deployed_instruction).content == _instruction("authoritative").encode()
+    )
+    assert deployed_instruction in _deployment_paths(after_install)
+    assert locked_dep.package_type == "apm_package"
+    assert locked_dep.resolved_commit == source_commit.sha
+    assert locked_dep.name == "hybrid-apm-kit"
+    assert deployed_instruction in locked_dep.deployed_files
+    assert deployed_instruction in locked_dep.deployed_file_hashes
+    assert locked_dep.marketplace_plugin_name is None
+    assert locked_dep.discovered_via is None
+    assert locked_dep.source_url is None
+    assert locked_dep.source_digest is None
+
+    _run_success(
+        scenario,
+        consumer,
+        ("uninstall", f"{_OWNER}/hybrid-apm-kit"),
+        environment=scenario.environment,
+        scenario_id="hybrid-precedence-uninstall",
+    )
+    after_uninstall = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+    _, audit = _audit(
+        scenario,
+        consumer,
+        environment=scenario.environment,
+        scenario_id="hybrid-precedence-audit",
+    )
+    after_audit = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+
+    assert after_uninstall.file(deployed_instruction).kind == "missing"
+    assert after_uninstall.lockfile_bytes is None
+    assert not after_uninstall.deployment_records
+    assert audit["passed"] is True
+    assert audit["summary"]["failed"] == 0
+    _assert_same_state(after_uninstall, after_audit)
 
 
 def test_required_pack_install_compile_audit_closes_regular_package_state(
@@ -884,6 +1167,322 @@ def test_required_tamper_is_detected_and_repair_restores_last_good_state(
 
     _assert_same_state(last_good, repaired)
     assert clean_audit["passed"] is True
+
+
+def test_required_global_audit_rule_matrix_for_external_roots(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    scenario = _new_scenario(tmp_path / "global-audit-matrix", apm_binary_path)
+    source = _publish(scenario, "global-audit-kit", skill="global-audit")
+    cwd = scenario.isolated.work_root
+    targets = ("claude", "hermes")
+    external_roots = {target: scenario.isolated.root / f"{target}-home" for target in targets}
+    for root in external_roots.values():
+        root.mkdir(parents=True)
+
+    sentinel_paths = {
+        target: PurePosixPath("user-owned") / f"{target}.sentinel" for target in targets
+    }
+    for target, sentinel in sentinel_paths.items():
+        sentinel_path = external_roots[target] / sentinel
+        sentinel_path.parent.mkdir(parents=True)
+        sentinel_path.write_bytes(f"{target}-owned-by-user\n".encode("ascii"))
+
+    environment = dict(source.environment)
+    for target, root in external_roots.items():
+        environment[_EXTERNAL_USER_ROOT_ENV[target]] = str(root)
+
+    skill_paths = {
+        target: PurePosixPath(_skill_deploy_path(target, "global-audit")) for target in targets
+    }
+    snapshot_paths = {target: (sentinel_paths[target], skill_paths[target]) for target in targets}
+    capture_roots = _external_root_specs(external_roots, config_paths=snapshot_paths)
+    scenario.isolated.config_root.mkdir(parents=True, exist_ok=True)
+    dump_yaml(
+        {
+            "name": "global-audit-consumer",
+            "version": "0.1.0",
+            "dependencies": {"apm": [source.dependency]},
+            "targets": list(targets),
+        },
+        scenario.isolated.config_root / "apm.yml",
+    )
+
+    install = scenario.runner.run(
+        (
+            "install",
+            "--global",
+            "--no-policy",
+            "--parallel-downloads",
+            "0",
+        ),
+        scenario_id="global-audit-install",
+        cwd=cwd,
+        env=environment,
+    )
+    assert install.returncode == 0, _result_evidence(install)
+    installed = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    installed_home = LifecycleStateSnapshot.capture(
+        cwd,
+        external_roots=(_apm_home_root(scenario),),
+    )
+    assert installed_home.file("apm.lock.yaml", root_id="apm-home").kind == "file"
+
+    source_skill_bytes = _skill("global-audit").encode()
+    for target in targets:
+        assert (
+            installed.file(skill_paths[target].as_posix(), root_id=f"{target}-home").content
+            == source_skill_bytes
+        )
+        assert installed.file(
+            sentinel_paths[target].as_posix(), root_id=f"{target}-home"
+        ).content == f"{target}-owned-by-user\n".encode("ascii")
+
+    def audit_row(
+        scenario_id: str,
+        *,
+        failed: set[str] | frozenset[str],
+        expected_returncode: int | None = None,
+    ) -> dict[str, object]:
+        if expected_returncode is None:
+            expected_returncode = 1 if failed else 0
+        _, payload = _audit_at(
+            scenario,
+            scenario.isolated.config_root,
+            environment=environment,
+            expected_returncode=expected_returncode,
+            scenario_id=scenario_id,
+        )
+        _assert_global_audit_rules(payload, failed=failed)
+        return payload
+
+    def assert_clean(scenario_id: str) -> dict[str, object]:
+        clean_payload = audit_row(scenario_id, failed=set())
+        assert _check(clean_payload, "drift")["passed"] is True
+        assert clean_payload["drift"] == {"drift": []}
+        return clean_payload
+
+    clean_audit = assert_clean("global-audit-clean")
+    assert _check(clean_audit, "deployed-files-present")["passed"] is True
+    assert _check(clean_audit, "content-integrity")["passed"] is True
+    post_clean_audit = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    _assert_same_state(installed, post_clean_audit)
+
+    claude_skill = external_roots["claude"] / skill_paths["claude"]
+    hermes_skill = external_roots["hermes"] / skill_paths["hermes"]
+    claude_skill_bytes = claude_skill.read_bytes()
+    hermes_skill_bytes = hermes_skill.read_bytes()
+
+    claude_skill.unlink()
+    deleted_before_audit = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    deleted_audit = audit_row(
+        "global-audit-deleted-file",
+        failed={"deployed-files-present", "drift"},
+    )
+    deleted_after_audit = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    assert _check(deleted_audit, "content-integrity")["passed"] is True
+    assert _drift_kinds_for(deleted_audit, {str(claude_skill)}) == {
+        (str(claude_skill), "unintegrated")
+    }
+    _assert_same_state(deleted_before_audit, deleted_after_audit)
+    claude_skill.write_bytes(claude_skill_bytes)
+    assert_clean("global-audit-after-delete-restore")
+
+    claude_skill.write_bytes(b"# user drift\n")
+    edited_before_audit = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    edited_audit = audit_row(
+        "global-audit-edited-file",
+        failed={"content-integrity", "drift"},
+    )
+    edited_after_audit = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    assert _check(edited_audit, "deployed-files-present")["passed"] is True
+    assert _drift_kinds_for(edited_audit, {str(claude_skill)}) == {(str(claude_skill), "modified")}
+    _assert_same_state(edited_before_audit, edited_after_audit)
+    claude_skill.write_bytes(claude_skill_bytes)
+    assert_clean("global-audit-after-edit-restore")
+
+    modules_dir = scenario.isolated.config_root / "apm_modules"
+    modules_backup = scenario.isolated.root / "apm-modules-backup"
+    shutil.move(str(modules_dir), str(modules_backup))
+    package_removed_before_audit = LifecycleStateSnapshot.capture(
+        cwd,
+        external_roots=capture_roots,
+    )
+    package_removed_audit = audit_row(
+        "global-audit-package-dir-removed",
+        failed={"config-consistency", "drift"},
+    )
+    package_removed_after_audit = LifecycleStateSnapshot.capture(
+        cwd,
+        external_roots=capture_roots,
+    )
+    assert _check(package_removed_audit, "no-orphaned-packages")["passed"] is True
+    assert _check(package_removed_audit, "deployed-files-present")["passed"] is True
+    assert _check(package_removed_audit, "content-integrity")["passed"] is True
+    _assert_same_state(package_removed_before_audit, package_removed_after_audit)
+    shutil.move(str(modules_backup), str(modules_dir))
+    assert_clean("global-audit-after-package-restore")
+
+    lock_path = scenario.isolated.config_root / "apm.lock.yaml"
+    lock_bytes = lock_path.read_bytes()
+    lock = load_yaml(lock_path)
+    lock["deployments"][0]["owners"] = ["missing-owner"]
+    lock["deployments"][0]["active_owner"] = "missing-owner"
+    dump_yaml(lock, lock_path)
+    ledger_before_audit = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    ledger_audit = audit_row(
+        "global-audit-ledger-owner-fault",
+        failed={"deployment-ledger-owners"},
+    )
+    ledger_after_audit = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    assert _check(ledger_audit, "deployed-files-present")["passed"] is True
+    assert _check(ledger_audit, "content-integrity")["passed"] is True
+    assert _check(ledger_audit, "drift")["passed"] is True
+    _assert_same_state(ledger_before_audit, ledger_after_audit)
+    lock_path.write_bytes(lock_bytes)
+    assert_clean("global-audit-after-ledger-restore")
+
+    outside = scenario.isolated.root / "outside-owned.md"
+    outside.write_bytes(b"outside-user-owned\n")
+    claude_skill.unlink()
+    claude_skill.symlink_to(outside)
+    symlink_before_audit = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    symlink_audit = audit_row(
+        "global-audit-unsafe-symlink",
+        failed={"deployed-files-present", "content-integrity", "drift"},
+    )
+    symlink_after_audit = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    assert _drift_kinds_for(symlink_audit, {str(claude_skill)}) == {
+        (str(claude_skill), "unintegrated")
+    }
+    assert outside.read_bytes() == b"outside-user-owned\n"
+    assert (
+        symlink_after_audit.file(skill_paths["claude"].as_posix(), root_id="claude-home").kind
+        == "symlink"
+    )
+    assert (
+        symlink_after_audit.file(
+            skill_paths["claude"].as_posix(), root_id="claude-home"
+        ).link_target
+        == symlink_before_audit.file(
+            skill_paths["claude"].as_posix(), root_id="claude-home"
+        ).link_target
+    )
+    _assert_same_state(symlink_before_audit, symlink_after_audit)
+    claude_skill.unlink()
+    claude_skill.write_bytes(claude_skill_bytes)
+    assert_clean("global-audit-after-symlink-restore")
+
+    claude_skill.unlink()
+    hermes_skill.write_bytes(b"# second fault\n")
+    combo_before_audit = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    combo_audit = audit_row(
+        "global-audit-combined-missing-and-edited",
+        failed={"deployed-files-present", "content-integrity", "drift"},
+    )
+    combo_after_audit = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    assert _drift_kinds_for(combo_audit, {str(claude_skill), str(hermes_skill)}) == {
+        (str(claude_skill), "unintegrated"),
+        (str(hermes_skill), "modified"),
+    }
+    _assert_same_state(combo_before_audit, combo_after_audit)
+    claude_skill.write_bytes(claude_skill_bytes)
+    hermes_skill.write_bytes(hermes_skill_bytes)
+    assert_clean("global-audit-after-combo-restore")
+
+    uninstall = scenario.runner.run(
+        ("uninstall", "--global", source.remote_url),
+        scenario_id="global-audit-uninstall",
+        cwd=cwd,
+        env=environment,
+    )
+    assert uninstall.returncode == 0, _result_evidence(uninstall)
+    removed = LifecycleStateSnapshot.capture(cwd, external_roots=capture_roots)
+    for target in targets:
+        assert (
+            removed.file(skill_paths[target].as_posix(), root_id=f"{target}-home").kind == "missing"
+        )
+        assert removed.file(
+            sentinel_paths[target].as_posix(), root_id=f"{target}-home"
+        ).content == f"{target}-owned-by-user\n".encode("ascii")
+    removed_home = LifecycleStateSnapshot.capture(
+        cwd,
+        external_roots=(_apm_home_root(scenario),),
+    )
+    assert removed_home.file("apm.lock.yaml", root_id="apm-home").kind == "missing"
+
+    _, final_audit = _audit_at(
+        scenario,
+        scenario.isolated.config_root,
+        environment=environment,
+        scenario_id="global-audit-after-uninstall",
+    )
+    assert final_audit["passed"] is True
+    assert final_audit["summary"]["failed"] == 0
+
+
+def test_required_failed_lock_write_releases_workspace_lock_and_preserves_state(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    scenario = _new_scenario(tmp_path / "lock-release", apm_binary_path)
+    source = _publish(scenario, "lock-release-kit", skill="lock-release")
+    consumer = scenario.consumers.create(
+        "lock-release-consumer",
+        dependencies=(source.dependency,),
+        targets=("copilot",),
+    )
+
+    _run_success(
+        scenario,
+        consumer,
+        _INSTALL_ARGS,
+        environment=source.environment,
+        scenario_id="lock-release-install-baseline",
+    )
+    scenario.consumers.set_targets(consumer, ("claude",))
+    capture_args = {
+        "targets": ("claude", "copilot"),
+        "config_paths": (
+            PurePosixPath(".agents/skills/lock-release/SKILL.md"),
+            PurePosixPath(".claude/skills/lock-release/SKILL.md"),
+        ),
+    }
+    before_failure = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+    failing_environment = dict(source.environment)
+    failing_environment["APM_TEST_FAIL_LOCK_REPLACE"] = "1"
+    failed = scenario.runner.run(
+        _INSTALL_ARGS,
+        scenario_id="lock-release-write-failure",
+        cwd=consumer.root,
+        env=failing_environment,
+    )
+    assert failed.returncode != 0, _result_evidence(failed)
+    after_failure = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+    assert after_failure.lockfile_bytes == before_failure.lockfile_bytes
+    assert list(consumer.root.glob("apm-atomic-*")) == []
+
+    _run_success(
+        scenario,
+        consumer,
+        _INSTALL_ARGS,
+        environment=source.environment,
+        scenario_id="lock-release-followup-install",
+    )
+    _, audit = _audit(
+        scenario,
+        consumer,
+        environment=source.environment,
+        scenario_id="lock-release-followup-audit",
+    )
+    released = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+    assert (
+        released.file(".claude/skills/lock-release/SKILL.md").content
+        == _skill("lock-release").encode()
+    )
+    assert released.file(".agents/skills/lock-release/SKILL.md").kind == "missing"
+    assert audit["passed"] is True
 
 
 def test_required_mixed_primitives_survive_reinstall_without_state_loss(
