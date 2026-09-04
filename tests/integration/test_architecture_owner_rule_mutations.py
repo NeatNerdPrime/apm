@@ -278,6 +278,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="BaseIntegrator drops a mandatory file-level deploy/sync/cleanup method.",
     ),
     MutationCase(
+        guard_id="install-deployment-bundle-native-layout",
+        rule_id="install-deployment-bundle-native-layout",
+        path="src/apm_cli/install/local_bundle_paths.py",
+        old="if mapping is not None:",
+        new='if target.name == "copilot" and mapping is not None:',
+        intent="Local bundle routing branches on target names instead of target primitives.",
+    ),
+    MutationCase(
         guard_id="install-deployment-executable-trust-context",
         rule_id="install-deployment-executable-trust-context",
         path="src/apm_cli/security/executables.py",
@@ -300,6 +308,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         old="user_scope=is_user_scope(scope)",
         new="user_scope=False",
         intent="Direct MCP target resolution stops consuming the command's scope decision.",
+    ),
+    MutationCase(
+        guard_id="install-deployment-lifecycle-serialization",
+        rule_id="install-deployment-lifecycle-serialization",
+        path="src/apm_cli/commands/config.py",
+        old="@serialized_lifecycle\ndef set(",
+        new="def set(",
+        intent="Config mutation stops routing through the canonical lifecycle lock.",
     ),
     MutationCase(
         guard_id="install-deployment-lsp-lifecycle",
@@ -428,14 +444,6 @@ MUTATIONS: tuple[MutationCase, ...] = (
         old="def materialize_marketplace_manifest(",
         new="def materialize_marketplace_manifest_X(",
         intent="Catalog-only marketplace manifest materialization loses its owner.",
-    ),
-    MutationCase(
-        guard_id="install-deployment-bundle-native-layout",
-        rule_id="install-deployment-bundle-native-layout",
-        path="src/apm_cli/install/local_bundle_paths.py",
-        old="if mapping is not None:",
-        new='if target.name == "copilot" and mapping is not None:',
-        intent="Local bundle routing branches on target names instead of target primitives.",
     ),
     MutationCase(
         guard_id="marketplace-integrations-copilot-ownership",
