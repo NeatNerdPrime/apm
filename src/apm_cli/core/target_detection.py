@@ -929,6 +929,7 @@ def resolve_effective_target_decision(
     manifest_target: str | list[str] | None,
     user_scope: bool = False,
     auto_detect: bool = True,
+    create_config: bool = True,
 ) -> EffectiveTargetDecision:
     """Choose the effective install target once using the public precedence.
 
@@ -946,7 +947,7 @@ def resolve_effective_target_decision(
 
     from apm_cli.config import get_install_target
 
-    configured_target = get_install_target()
+    configured_target = get_install_target(create_config=create_config)
     if configured_target is not None:
         return EffectiveTargetDecision(configured_target, "apm config target")
 
@@ -964,6 +965,7 @@ def resolve_package_target_decision(
     explicit_target: str | list[str] | None,
     user_scope: bool = False,
     auto_detect: bool = True,
+    create_config: bool = True,
 ) -> EffectiveTargetDecision:
     """Resolve one effective target decision from a parsed package manifest."""
     from apm_cli.models.apm_package import package_target_selection
@@ -974,6 +976,7 @@ def resolve_package_target_decision(
         manifest_target=package_target_selection(package) if package is not None else None,
         user_scope=user_scope,
         auto_detect=auto_detect,
+        create_config=create_config,
     )
 
 
@@ -983,6 +986,7 @@ def resolve_manifest_target_decision(
     manifest_path: Path,
     explicit_target: str | list[str] | None,
     user_scope: bool = False,
+    create_config: bool = True,
 ) -> EffectiveTargetDecision:
     """Resolve one effective target decision from an optional manifest path."""
     package = None
@@ -995,6 +999,7 @@ def resolve_manifest_target_decision(
         package=package,
         explicit_target=explicit_target,
         user_scope=user_scope,
+        create_config=create_config,
     )
 
 
