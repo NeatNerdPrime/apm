@@ -588,31 +588,28 @@ class TestCachedDependencySourceAcquire:
     def test_receiptless_plugin_error_identifies_cache_and_recovery(self, tmp_path: Path) -> None:
         """Invalid legacy caches name the dependency, path, and recovery action."""
         from apm_cli.install.errors import DirectDependencyError
-        from apm_cli.models.apm_package import PackageType
+        from apm_cli.install.legacy_plugin_compat import upgrade_cached_legacy_plugin
 
-        ctx = _make_ctx(targets=["copilot"])
-        dep_ref = _make_dep_ref(is_virtual=False)
         install_path = tmp_path / "cached-plugin"
         install_path.mkdir()
         (install_path / "apm.yml").write_text("name: cached-plugin\n", encoding="ascii")
         invalid = MagicMock(is_valid=False, package=None, errors=["invalid metadata"])
-        evidence = MagicMock(has_plugin_manifest=True)
+        evidence = MagicMock(
+            has_plugin_manifest=True, plugin_json_path=install_path / "plugin.json"
+        )
 
         with (
-            patch("apm_cli.bundle.local_bundle.route_agent_plugin_package", return_value=None),
             patch(
-                "apm_cli.models.validation.detect_package_type",
-                return_value=(PackageType.SKILL_BUNDLE, None),
+                "apm_cli.install.legacy_plugin_compat.gather_detection_evidence",
+                return_value=evidence,
             ),
-            patch("apm_cli.models.validation.gather_detection_evidence", return_value=evidence),
             patch(
-                "apm_cli.models.validation.validate_legacy_marketplace_plugin",
+                "apm_cli.install.legacy_plugin_compat.validate_legacy_marketplace_plugin",
                 return_value=invalid,
             ),
         ):
-            source = self._make_source(ctx, dep_ref, install_path, dep_key="owner/cached-plugin")
             with pytest.raises(DirectDependencyError) as exc_info:
-                source.acquire()
+                upgrade_cached_legacy_plugin(install_path, "owner/cached-plugin")
 
         message = str(exc_info.value)
         assert "owner/cached-plugin" in message
