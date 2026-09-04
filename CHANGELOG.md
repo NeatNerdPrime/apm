@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `apm uninstall --global` now removes managed Copilot hook files from
   `~/.copilot/hooks/` while preserving user-authored hooks. (by @aryansk; closes
   #2558) (#2559)
+- `apm install --dry-run -g` no longer creates `~/.apm` when the user
+  manifest is absent; preview state now stays temporary.
+  (by @aryansk, closes #2549) (#2592)
 - `apm install` now preserves previously deployed skills when package
   integration is skipped instead of treating them as stale cleanup candidates.
   (#2758)

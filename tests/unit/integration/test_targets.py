@@ -447,10 +447,10 @@ class TestGrokCloudTarget:
     def test_grok_cloud_requires_flag_gate(self, monkeypatch, tmp_path):
         import apm_cli.integration.targets as tg
 
-        monkeypatch.setattr(tg, "_is_flag_enabled", lambda name: False)
+        monkeypatch.setattr(tg, "_is_flag_enabled", lambda name, **kwargs: False)
         assert active_targets(tmp_path, explicit_target="grok-cloud") == []
 
-        monkeypatch.setattr(tg, "_is_flag_enabled", lambda name: True)
+        monkeypatch.setattr(tg, "_is_flag_enabled", lambda name, **kwargs: True)
         assert [p.name for p in active_targets(tmp_path, explicit_target="grok-cloud")] == [
             "grok-cloud"
         ]
@@ -458,7 +458,7 @@ class TestGrokCloudTarget:
     def test_grok_cloud_is_excluded_from_all(self, monkeypatch, tmp_path):
         import apm_cli.integration.targets as tg
 
-        monkeypatch.setattr(tg, "_is_flag_enabled", lambda name: True)
+        monkeypatch.setattr(tg, "_is_flag_enabled", lambda name, **kwargs: True)
         names = {p.name for p in active_targets(tmp_path, explicit_target="all")}
         assert "grok-cloud" not in names
 
@@ -516,14 +516,14 @@ class TestHermesTarget:
     def test_hermes_excluded_from_all(self, monkeypatch):
         import apm_cli.integration.targets as tg
 
-        monkeypatch.setattr(tg, "_is_flag_enabled", lambda name: True)
+        monkeypatch.setattr(tg, "_is_flag_enabled", lambda name, **kwargs: True)
         names = {p.name for p in active_targets(self.root, explicit_target="all")}
         assert "hermes" not in names
 
     def test_hermes_user_scope_root(self, monkeypatch):
         import apm_cli.integration.targets as tg
 
-        monkeypatch.setattr(tg, "_is_flag_enabled", lambda name: True)
+        monkeypatch.setattr(tg, "_is_flag_enabled", lambda name, **kwargs: True)
         profile = KNOWN_TARGETS["hermes"].for_scope(user_scope=True)
         assert profile is not None
         assert profile.root_dir == ".hermes"

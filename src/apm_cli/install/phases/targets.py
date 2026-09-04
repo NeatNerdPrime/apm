@@ -238,7 +238,12 @@ def _check_experimental_target_hint(
 
     from apm_cli.install.target_hints import emit_disabled_experimental_target_hint
 
-    emit_disabled_experimental_target_hint(target_name, targets, ctx.logger)
+    emit_disabled_experimental_target_hint(
+        target_name,
+        targets,
+        ctx.logger,
+        create_config=getattr(ctx, "create_config", True),
+    )
 
 
 def _gate_cowork_target(
@@ -266,7 +271,12 @@ def _gate_cowork_target(
         if not _cowork_resolved:
             from apm_cli.install.target_hints import emit_disabled_experimental_target_hint
 
-            if not emit_disabled_experimental_target_hint("copilot-cowork", targets, ctx.logger):
+            if not emit_disabled_experimental_target_hint(
+                "copilot-cowork",
+                targets,
+                ctx.logger,
+                create_config=getattr(ctx, "create_config", True),
+            ):
                 import sys as _sys
 
                 if _sys.platform.startswith("linux"):
@@ -324,7 +334,12 @@ def _gate_copilot_app_target(
 
     from apm_cli.install.target_hints import emit_disabled_experimental_target_hint
 
-    if not emit_disabled_experimental_target_hint("copilot-app", targets, ctx.logger):
+    if not emit_disabled_experimental_target_hint(
+        "copilot-app",
+        targets,
+        ctx.logger,
+        create_config=getattr(ctx, "create_config", True),
+    ):
         _app_msg = (
             "GitHub Copilot desktop App not detected.\n"
             "Expected ~/.copilot/data.db but the file is missing.\n"
@@ -489,6 +504,7 @@ def run(ctx: InstallContext) -> None:
             manifest_target=config_target,
             user_scope=ctx.scope is InstallScope.USER,
             auto_detect=False,
+            create_config=getattr(ctx, "create_config", True),
         )
         ctx.target_decision = target_decision
         ctx.target_override = target_decision.value

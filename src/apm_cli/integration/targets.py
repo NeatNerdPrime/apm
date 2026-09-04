@@ -1088,14 +1088,14 @@ def _resolve_copilot_app_root() -> Path | None:
     return resolve_copilot_app_root()
 
 
-def _is_flag_enabled(flag_name: str) -> bool:
+def _is_flag_enabled(flag_name: str, *, create_config: bool = True) -> bool:
     """Check whether an experimental flag is enabled.
 
     Lazy import to avoid config I/O at module load time.
     """
     from apm_cli.core.experimental import is_enabled
 
-    return is_enabled(flag_name)
+    return is_enabled(flag_name, create_config=create_config)
 
 
 def resolve_hermes_root() -> Path:
@@ -1118,11 +1118,11 @@ def resolve_hermes_root() -> Path:
     return (Path.home() / ".hermes").resolve(strict=False)
 
 
-def _flag_gated(profile: TargetProfile) -> bool:
+def _flag_gated(profile: TargetProfile, *, create_config: bool = True) -> bool:
     """Return ``True`` if *profile* passes its flag gate (or has none)."""
     if profile.requires_flag is None:
         return True
-    return _is_flag_enabled(profile.requires_flag)
+    return _is_flag_enabled(profile.requires_flag, create_config=create_config)
 
 
 def get_integration_prefixes(targets=None, *, user_scope: bool = False) -> tuple:
@@ -1177,6 +1177,8 @@ def get_integration_prefixes(targets=None, *, user_scope: bool = False) -> tuple
 
 def active_targets_user_scope(
     explicit_target: str | list[str] | None = None,
+    *,
+    create_config: bool = True,
 ) -> list:
     """Return ``TargetProfile`` instances for user-scope deployment.
 
@@ -1222,13 +1224,13 @@ def active_targets_user_scope(
                     if p.name in all_targets
                     and not p.capability.explicit_only
                     and p.user_supported
-                    and _flag_gated(p)
+                    and _flag_gated(p, create_config=create_config)
                 ]
             profile = KNOWN_TARGETS.get(canonical)
             if (
                 profile
                 and profile.user_supported
-                and _flag_gated(profile)
+                and _flag_gated(profile, create_config=create_config)
                 and profile.name not in seen
             ):
                 seen.add(profile.name)
@@ -1242,7 +1244,7 @@ def active_targets_user_scope(
         for p in KNOWN_TARGETS.values()
         if p.user_supported
         and p.detect_by_dir
-        and _flag_gated(p)
+        and _flag_gated(p, create_config=create_config)
         and (home / p.effective_root(user_scope=True)).is_dir()
     ]
     if detected:
@@ -1255,6 +1257,8 @@ def active_targets_user_scope(
 def active_targets(
     project_root,
     explicit_target: str | list[str] | None = None,
+    *,
+    create_config: bool = True,
 ) -> list:
     """Return the list of ``TargetProfile`` instances that should be
     deployed into *project_root*.
@@ -1304,7 +1308,11 @@ def active_targets(
                 all_targets = {normalize_target_name(target) for target in expand_all("install")}
                 return [p for p in KNOWN_TARGETS.values() if p.name in all_targets]
             profile = KNOWN_TARGETS.get(canonical)
-            if profile and _flag_gated(profile) and profile.name not in seen:
+            if (
+                profile
+                and _flag_gated(profile, create_config=create_config)
+                and profile.name not in seen
+            ):
                 seen.add(profile.name)
                 profiles.append(profile)
         return profiles
@@ -1314,7 +1322,9 @@ def active_targets(
     detected = [
         p
         for p in KNOWN_TARGETS.values()
-        if p.detect_by_dir and _flag_gated(p) and (root / p.root_dir).is_dir()
+        if p.detect_by_dir
+        and _flag_gated(p, create_config=create_config)
+        and (root / p.root_dir).is_dir()
     ]
     if detected:
         return detected
@@ -1327,6 +1337,8 @@ def resolve_targets(
     project_root,
     user_scope: bool = False,
     explicit_target: str | list[str] | None = None,
+    *,
+    create_config: bool = True,
 ) -> list:
     """Return scope-resolved ``TargetProfile`` instances.
 
@@ -1344,9 +1356,9 @@ def resolve_targets(
             or ``"all"``.  ``None`` means auto-detect.
     """
     if user_scope:
-        raw = active_targets_user_scope(explicit_target)
+        raw = active_targets_user_scope(explicit_target, create_config=create_config)
     else:
-        raw = active_targets(project_root, explicit_target)
+        raw = active_targets(project_root, explicit_target, create_config=create_config)
 
     resolved = []
     for t in raw:
