@@ -615,6 +615,7 @@ contracts-tooling-project-yaml-write-delegation
 install-deployment-approval-outcome-routing
 install-deployment-audit-policy-discovery
 install-deployment-audit-replay
+install-deployment-bundle-native-layout
 install-deployment-base-integrator
 install-deployment-cached-claude-skill-metadata
 install-deployment-dependency-winner-selection
