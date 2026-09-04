@@ -642,7 +642,7 @@ See [apm config](../../reference/cli/config/) for the full transport-preference 
 Authentication and transport are independent decisions:
 
 - **HTTPS** uses the token resolution chain documented above. APM resolves a
-  token per `(host, org)` and sends managed GitHub, GitLab, and Azure DevOps
+  token per `(host, port, org)` and sends managed GitHub, GitLab, and Azure DevOps
   credentials through a process-scoped Authorization header, never URL userinfo.
 - **SSH** uses your existing ssh-agent and `~/.ssh/config`. APM does not
   select keys or override agent behavior -- whatever `git clone` would do

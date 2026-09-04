@@ -13,17 +13,20 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from git import Repo
 
 from apm_cli.cache.git_cache import GitCache
 from apm_cli.cache.url_normalize import cache_shard_key
-from apm_cli.core.auth import AuthResolver
+from apm_cli.core.auth import AuthContext, AuthResolver, HostInfo
 from apm_cli.deps.bare_cache import (
     bare_clone_with_fallback,
     clone_with_fallback,
     materialize_from_bare,
 )
+from apm_cli.deps.clone_engine import CloneEngine
 from apm_cli.deps.github_downloader import GitHubPackageDownloader
 from apm_cli.deps.github_downloader_validation import AttemptSpec, _path_exists_in_tree_at_ref
+from apm_cli.deps.transport_selection import TransportAttempt, TransportPlan
 from apm_cli.models.dependency.reference import DependencyReference
 from apm_cli.utils.git_env import (
     GitUrlRewriteError,
@@ -37,6 +40,10 @@ from tests.integration.test_marketplace_generic_https_credential_lifecycle impor
     _git_exec_path,
     _real_git,
     _write_tls_certificate,
+)
+from tests.utils.git_credential_sentinel import (
+    credential_helper_trap_env,
+    exercise_credential_helper,
 )
 from tests.utils.isolated_apm_environment import IsolatedApmEnvironment
 from tests.utils.local_git_http_server import LocalGitHttpServerFactory
@@ -115,6 +122,83 @@ def _add_git_config(config: Path, key: str, value: str) -> None:
         capture_output=True,
         text=True,
     )
+
+
+def test_ado_clone_and_ref_resolution_preserve_caller_git_policy(tmp_path: Path) -> None:
+    """Tokenless ADO keeps safe caller rewrites while suppressing native helpers."""
+    isolated = IsolatedApmEnvironment.create(tmp_path / "ado-policy", base_env=os.environ)
+    environment = isolated.subprocess_env()
+    environment["GIT_ALLOW_PROTOCOL"] = "file:https"
+    repositories = LocalGitRepositoryFactory(isolated.repository_root, env=environment)
+    repository = repositories.create("ado-policy")
+    (repository.worktree / "README.md").write_text("# ADO policy fixture\n", encoding="ascii")
+    commit = repositories.commit(repository, message="seed ADO policy fixture")
+    remote_url = "https://dev.azure.com/org/project/_git/repo"
+    caller_env = repositories.url_rewrite_subprocess_env(repository, remote_url)
+    helper_root = tmp_path / "helper"
+    helper_root.mkdir()
+    helper_env, helper_marker = credential_helper_trap_env(helper_root)
+    caller_env.update(
+        {
+            "APM_TEST_HELPER_MARKER": helper_env["APM_TEST_HELPER_MARKER"],
+            "GIT_CONFIG_GLOBAL": helper_env["GIT_CONFIG_GLOBAL"],
+        }
+    )
+
+    dep = DependencyReference.parse(f"{remote_url}#main")
+    context = AuthContext(
+        token=None,
+        source="none",
+        token_type="unknown",
+        host_info=HostInfo(
+            host="dev.azure.com",
+            kind="ado",
+            has_public_repos=False,
+            api_base="https://dev.azure.com",
+        ),
+        git_env={},
+    )
+    host = GitHubPackageDownloader(auth_resolver=AuthResolver())
+    host.git_env = caller_env
+    host._resolve_dep_token = lambda _dep=None: None
+    host._resolve_dep_auth_ctx = lambda _dep=None: context
+    host._transport_selector.select = lambda **_kwargs: TransportPlan(
+        attempts=[TransportAttempt(scheme="https", label="plain HTTPS", use_token=False)],
+        strict=True,
+    )
+    host._build_repo_url = lambda *_args, **_kwargs: remote_url
+
+    clone_target = isolated.work_root / "clone"
+    clone_envs: list[dict[str, str]] = []
+
+    def clone_action(url: str, env: dict[str, str], target: Path) -> None:
+        clone_envs.append(env)
+        exercise_credential_helper(env, host="dev.azure.com", path="org/project/_git/repo")
+        Repo.clone_from(url, target, env=env)
+
+    CloneEngine(host).execute(
+        dep.repo_url,
+        clone_target,
+        dep_ref=dep,
+        clone_action=clone_action,
+    )
+
+    from apm_cli.utils.git_env import git_remote_refs as real_git_remote_refs
+
+    ref_envs: list[dict[str, str]] = []
+
+    def remote_refs_with_policy(url: str, *, env: dict[str, str], options=()):
+        ref_envs.append(env)
+        exercise_credential_helper(env, host="dev.azure.com", path="org/project/_git/repo")
+        return real_git_remote_refs(url, env=env, options=options)
+
+    with patch("apm_cli.utils.git_env.git_remote_refs", side_effect=remote_refs_with_policy):
+        refs = host.list_remote_refs(dep)
+
+    assert _git(clone_target, "rev-parse", "HEAD") == commit.sha
+    assert {ref.commit_sha for ref in refs} == {commit.sha}
+    assert clone_envs and ref_envs
+    assert not helper_marker.exists()
 
 
 def test_real_https_anonymous_fence_drops_injected_ambient_header(tmp_path: Path) -> None:

@@ -342,9 +342,10 @@ def test_generic_https_marketplace_add_rejects_http_rewrite(
     )
 
     output = f"{result.stdout}\n{result.stderr}"
+    normalized_output = " ".join(output.split())
     assert result.returncode == 1
     assert "Failed to register marketplace" in output
     assert "rewrite" in output
     assert "insecure HTTP" in output
-    assert "apm marketplace update downgrade-marketplace" in output
+    assert "apm marketplace update downgrade-marketplace" in normalized_output
     assert "github-apm-sentinel" not in output
