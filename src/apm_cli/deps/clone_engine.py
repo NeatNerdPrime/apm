@@ -243,6 +243,7 @@ class CloneEngine:
                 return host.auth_resolver.git_env_for_remote(
                     ado_context,
                     attempt.effective_url or attempt_url,
+                    base_env=host.git_env,
                 )
             if is_generic and dep_ref is not None:
                 org = repo_url_base.split("/", 1)[0] if "/" in repo_url_base else None

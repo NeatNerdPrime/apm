@@ -555,6 +555,20 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Install validation bypasses canonical ADO PAT-to-bearer fallback.",
     ),
     MutationCase(
+        guard_id="transport-platform-ado-validation-caller-config",
+        rule_id="transport-platform-host-credential-resolution",
+        path="src/apm_cli/deps/clone_engine.py",
+        old=(
+            "                    attempt.effective_url or attempt_url,\n"
+            "                    base_env=host.git_env,"
+        ),
+        new=(
+            "                    attempt.effective_url or attempt_url,\n"
+            "                    base_env=None,"
+        ),
+        intent="Tokenless ADO clone attempts discard caller-owned Git configuration.",
+    ),
+    MutationCase(
         guard_id="transport-platform-ado-validation-clone-bearer-fallback",
         rule_id="transport-platform-host-credential-resolution",
         path="src/apm_cli/deps/clone_engine.py",

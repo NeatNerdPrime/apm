@@ -11,6 +11,7 @@
       ],
       "guards": [
         "transport-platform-ado-validation-bearer-fallback",
+        "transport-platform-ado-validation-caller-config",
         "transport-platform-ado-validation-clone-bearer-fallback",
         "transport-platform-ado-validation-helper-suppression",
         "transport-platform-host-credential-resolution"

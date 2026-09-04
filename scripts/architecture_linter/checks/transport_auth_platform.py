@@ -49,6 +49,7 @@ from scripts.architecture_linter.models import Rule, Violation
 
 _RID_HOST_CRED = "transport-platform-host-credential-resolution"
 _RID_ADO_VALIDATION = "transport-platform-ado-validation-bearer-fallback"
+_RID_ADO_CALLER_CONFIG = "transport-platform-ado-validation-caller-config"
 _RID_ADO_CLONE_FALLBACK = "transport-platform-ado-validation-clone-bearer-fallback"
 _RID_ADO_HELPER_SUPPRESSION = "transport-platform-ado-validation-helper-suppression"
 _RID_GIT_CHILD_ENV = "transport-platform-git-child-environment"
@@ -220,6 +221,7 @@ def _check_host_credential_resolution(provider: FactsProvider) -> tuple[Violatio
                 "host.auth_resolver.git_env_for_remote(",
                 "host.auth_resolver.execute_with_bearer_fallback(",
                 "host.auth_resolver.build_ado_bearer_git_env(",
+                "attempt.effective_url or attempt_url,\n                    base_env=host.git_env,",
             ),
         ),
         (
@@ -227,6 +229,8 @@ def _check_host_credential_resolution(provider: FactsProvider) -> tuple[Violatio
             (
                 "host.auth_resolver.git_env_for_remote(",
                 "host.auth_resolver.execute_with_bearer_fallback(",
+                "transport_attempt.effective_url or rewrite_candidate,\n"
+                "                base_env=host.git_env,",
             ),
         ),
     )
@@ -1358,6 +1362,7 @@ RULES: tuple[Rule, ...] = (
         group=GROUP,
         guard_ids=(
             _RID_ADO_VALIDATION,
+            _RID_ADO_CALLER_CONFIG,
             _RID_ADO_CLONE_FALLBACK,
             _RID_ADO_HELPER_SUPPRESSION,
             _RID_HOST_CRED,

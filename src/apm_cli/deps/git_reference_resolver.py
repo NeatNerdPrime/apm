@@ -225,6 +225,7 @@ class GitReferenceResolver:
             ls_env = host.auth_resolver.git_env_for_remote(
                 ado_context,
                 transport_attempt.effective_url or rewrite_candidate,
+                base_env=host.git_env,
             )
         else:
             ls_env = host._build_noninteractive_git_env(
