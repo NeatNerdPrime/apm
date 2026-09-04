@@ -31,6 +31,8 @@ pytestmark = [
     pytest.mark.requires_apm_binary,
 ]
 
+_CLAUDE_LSP_PLUGIN = Path(".claude") / "skills" / "apm-lsp" / ".claude-plugin" / "plugin.json"
+
 
 def _runner(apm_binary_path: Path) -> ApmLifecycleRunner:
     """Return the bounded real-binary runner for one lifecycle scenario."""
@@ -956,6 +958,349 @@ def test_lsp_reinstall_and_update_keep_copilot_state_deterministic(
     )
 
 
+def test_claude_lsp_install_writes_discoverable_skills_directory_plugin(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """Claude LSP install must emit the plugin manifest Claude discovers."""
+    fixture = _create_git_lifecycle_project(
+        tmp_path / "claude-lsp-discovery",
+        source_name="claude-lsp-source",
+        lsp_dependencies=(
+            {
+                "name": "basedpyright",
+                "command": "uv",
+                "args": ["run", "basedpyright-langserver", "--stdio"],
+                "extensionToLanguage": {".py": "python", ".pyi": "python"},
+            },
+        ),
+        targets=("claude",),
+    )
+    legacy_path = fixture.project_root / ".lsp.json"
+    legacy_bytes = b'{"lspServers":{"user-owned":{"command":"keep-me"}}}\n'
+    legacy_path.write_bytes(legacy_bytes)
+
+    result = _runner(apm_binary_path).run_sequence(
+        (("install", "--no-policy"),),
+        expected_returncodes=(0,),
+        scenario_id="claude-lsp-discovery",
+        cwd=fixture.project_root,
+        env=fixture.isolated.subprocess_env(),
+    )
+
+    plugin_path = fixture.project_root / _CLAUDE_LSP_PLUGIN
+    assert json.loads(plugin_path.read_text(encoding="utf-8")) == {
+        "name": "apm-lsp",
+        "lspServers": {
+            "basedpyright": {
+                "command": "uv",
+                "args": ["run", "basedpyright-langserver", "--stdio"],
+                "extensionToLanguage": {".py": "python", ".pyi": "python"},
+            }
+        },
+    }
+    assert legacy_path.read_bytes() == legacy_bytes
+    assert "Retained legacy .lsp.json" in result[0].stdout
+
+
+def test_claude_lsp_collision_requires_force_and_force_reconciles(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """The installed CLI must require explicit consent before replacement."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / "claude-lsp-collision",
+        base_env=dict(os.environ),
+    )
+    project = LocalPackageFactory(isolated.work_root).create(
+        "consumer",
+        lsp_dependencies=(
+            {
+                "name": "pyright",
+                "command": "pyright-langserver",
+                "extensionToLanguage": {".py": "python"},
+            },
+        ),
+        targets=("claude",),
+    )
+    plugin_path = project.root / _CLAUDE_LSP_PLUGIN
+    plugin_path.parent.mkdir(parents=True)
+    original = b"[]\n"
+    plugin_path.write_bytes(original)
+    runner = _runner(apm_binary_path)
+    environment = isolated.subprocess_env()
+
+    (refused,) = runner.run_sequence(
+        (("install", "--no-policy"),),
+        expected_returncodes=(1,),
+        scenario_id="claude-lsp-collision-refused",
+        cwd=project.root,
+        env=environment,
+    )
+    assert "--force" in refused.stdout
+    assert plugin_path.read_bytes() == original
+
+    runner.run_sequence(
+        (("install", "--no-policy", "--force"),),
+        expected_returncodes=(0,),
+        scenario_id="claude-lsp-collision-forced",
+        cwd=project.root,
+        env=environment,
+    )
+    plugin = json.loads(plugin_path.read_text(encoding="utf-8"))
+    assert plugin["name"] == "apm-lsp"
+    assert set(plugin["lspServers"]) == {"pyright"}
+
+    foreign = b'{"name":"custom-plugin","lspServers":{"pyright":{"command":"foreign"}}}\n'
+    plugin_path.write_bytes(foreign)
+    (update_refused,) = runner.run_sequence(
+        (("update", "--yes"),),
+        expected_returncodes=(1,),
+        scenario_id="claude-lsp-update-collision-refused",
+        cwd=project.root,
+        env=environment,
+    )
+    assert "--force" in update_refused.stdout
+    assert plugin_path.read_bytes() == foreign
+
+    runner.run_sequence(
+        (("update", "--yes", "--force"),),
+        expected_returncodes=(0,),
+        scenario_id="claude-lsp-update-collision-forced",
+        cwd=project.root,
+        env=environment,
+    )
+    repaired = json.loads(plugin_path.read_text(encoding="utf-8"))
+    assert repaired["name"] == "apm-lsp"
+    assert repaired["lspServers"]["pyright"]["command"] == "pyright-langserver"
+
+
+def test_claude_lsp_unapproved_package_is_not_discoverable(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """Executable approval must bind a generated LSP to its declaring package."""
+    fixture = _create_git_lifecycle_project(
+        tmp_path / "claude-lsp-approval",
+        source_name="unapproved-lsp-source",
+        lsp_dependencies=(
+            {
+                "name": "shared-approved-name",
+                "command": "unapproved-language-server",
+                "extensionToLanguage": {".unsafe": "unsafe"},
+            },
+        ),
+        targets=("claude",),
+    )
+    manifest_path = fixture.project_root / "apm.yml"
+    manifest = load_yaml(manifest_path)
+    manifest["executables"] = {
+        "allow": {
+            "different/package": {
+                "lsp": True,
+            }
+        }
+    }
+    dump_yaml(manifest, manifest_path)
+
+    (result,) = _runner(apm_binary_path).run_sequence(
+        (("install", "--no-policy"),),
+        expected_returncodes=(0,),
+        scenario_id="claude-lsp-unapproved-package",
+        cwd=fixture.project_root,
+        env=fixture.isolated.subprocess_env(),
+    )
+
+    assert not (fixture.project_root / _CLAUDE_LSP_PLUGIN).exists()
+    assert "apm policy explain" in result.stdout
+    (partial,) = _runner(apm_binary_path).run_sequence(
+        (("install", "--only", "mcp", "--no-policy"),),
+        expected_returncodes=(0,),
+        scenario_id="claude-lsp-unapproved-package-partial-install",
+        cwd=fixture.project_root,
+        env=fixture.isolated.subprocess_env(),
+    )
+    assert not (fixture.project_root / _CLAUDE_LSP_PLUGIN).exists()
+    assert "apm approve" not in partial.stdout
+    (updated,) = _runner(apm_binary_path).run_sequence(
+        (("update", "--yes"),),
+        expected_returncodes=(0,),
+        scenario_id="claude-lsp-unapproved-package-update",
+        cwd=fixture.project_root,
+        env=fixture.isolated.subprocess_env(),
+    )
+    assert not (fixture.project_root / _CLAUDE_LSP_PLUGIN).exists()
+    assert "apm policy explain" in updated.stdout
+
+
+def test_claude_lsp_approved_declaring_package_is_discoverable(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """A package-scoped LSP grant must materialize that package's server."""
+    fixture = _create_git_lifecycle_project(
+        tmp_path / "claude-lsp-approved",
+        source_name="approved-lsp-source",
+        lsp_dependencies=(
+            {
+                "name": "server-name-is-not-the-approval-key",
+                "command": "approved-language-server",
+                "extensionToLanguage": {".safe": "safe"},
+            },
+        ),
+        targets=("claude",),
+    )
+    manifest_path = fixture.project_root / "apm.yml"
+    manifest = load_yaml(manifest_path)
+    from apm_cli.models.apm_package import APMPackage
+
+    approval_key = APMPackage.from_apm_yml(manifest_path).get_apm_dependencies()[0].get_unique_key()
+    manifest["executables"] = {
+        "allow": {
+            approval_key: {
+                "lsp": True,
+            }
+        }
+    }
+    dump_yaml(manifest, manifest_path)
+
+    _runner(apm_binary_path).run_sequence(
+        (("install", "--no-policy"),),
+        expected_returncodes=(0,),
+        scenario_id="claude-lsp-approved-package",
+        cwd=fixture.project_root,
+        env=fixture.isolated.subprocess_env(),
+    )
+
+    plugin = json.loads((fixture.project_root / _CLAUDE_LSP_PLUGIN).read_text(encoding="utf-8"))
+    assert set(plugin["lspServers"]) == {"server-name-is-not-the-approval-key"}
+
+
+def test_lsp_target_contraction_revokes_dropped_claude_plugin_entry(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """Changing the manifest target must revoke the old executable config."""
+    fixture = _create_git_lifecycle_project(
+        tmp_path / "lsp-target-contraction",
+        source_name="target-contraction-source",
+        lsp_dependencies=(
+            {
+                "name": "target-contraction-lsp",
+                "command": "target-contraction-language-server",
+                "extensionToLanguage": {".target": "target"},
+            },
+        ),
+        targets=("claude",),
+    )
+    runner = _runner(apm_binary_path)
+    environment = fixture.isolated.subprocess_env()
+    runner.run_sequence(
+        ((("install", "--no-policy")),),
+        expected_returncodes=(0,),
+        scenario_id="lsp-target-contraction-initial",
+        cwd=fixture.project_root,
+        env=environment,
+    )
+    claude_lsp = fixture.project_root / _CLAUDE_LSP_PLUGIN
+    assert "target-contraction-lsp" in json.loads(claude_lsp.read_text())["lspServers"]
+
+    manifest_path = fixture.project_root / "apm.yml"
+    manifest = load_yaml(manifest_path)
+    manifest["targets"] = ["copilot"]
+    dump_yaml(manifest, manifest_path)
+    runner.run_sequence(
+        ((("install", "--no-policy")),),
+        expected_returncodes=(0,),
+        scenario_id="lsp-target-contraction-copilot",
+        cwd=fixture.project_root,
+        env=environment,
+    )
+
+    copilot_lsp = fixture.project_root / ".github" / "lsp.json"
+    assert "target-contraction-lsp" in json.loads(copilot_lsp.read_text())["lspServers"]
+    assert not claude_lsp.exists()
+    lockfile = LockFile.read(fixture.project_root / "apm.lock.yaml")
+    assert lockfile is not None
+    assert lockfile.lsp_target_servers == {"copilot": ["target-contraction-lsp"]}
+
+
+def test_only_mcp_does_not_materialize_root_lsp(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """The MCP-only filter must exclude root-project LSP declarations."""
+    isolated = IsolatedApmEnvironment.create(
+        tmp_path / "only-mcp-lsp",
+        base_env=dict(os.environ),
+    )
+    project = LocalPackageFactory(isolated.work_root).create(
+        "consumer",
+        lsp_dependencies=(
+            {
+                "name": "must-not-deploy",
+                "command": "must-not-run",
+                "extensionToLanguage": {".none": "none"},
+            },
+        ),
+        targets=("claude",),
+    )
+
+    _runner(apm_binary_path).run_sequence(
+        (("install", "--only", "mcp", "--no-policy"),),
+        expected_returncodes=(0,),
+        scenario_id="only-mcp-excludes-lsp",
+        cwd=project.root,
+        env=isolated.subprocess_env(),
+    )
+
+    assert not (project.root / _CLAUDE_LSP_PLUGIN).exists()
+
+
+def test_lsp_uninstall_cleanup_failure_is_nonzero_and_actionable(
+    tmp_path: Path,
+    apm_binary_path: Path,
+) -> None:
+    """Unsafe LSP cleanup must preserve foreign config and report recovery."""
+    fixture = _create_git_lifecycle_project(
+        tmp_path / "lsp-uninstall-cleanup-failure",
+        source_name="lsp-uninstall-source",
+        lsp_dependencies=(
+            {
+                "name": "uninstall-lsp",
+                "command": "uninstall-language-server",
+                "extensionToLanguage": {".uninstall": "uninstall"},
+            },
+        ),
+        targets=("claude",),
+    )
+    runner = _runner(apm_binary_path)
+    environment = fixture.isolated.subprocess_env()
+    runner.run_sequence(
+        (("install", "--no-policy"),),
+        expected_returncodes=(0,),
+        scenario_id="lsp-uninstall-cleanup-install",
+        cwd=fixture.project_root,
+        env=environment,
+    )
+    plugin_path = fixture.project_root / _CLAUDE_LSP_PLUGIN
+    foreign = b'{"name":"foreign-plugin","lspServers":{"uninstall-lsp":{"command":"keep"}}}\n'
+    plugin_path.write_bytes(foreign)
+
+    (result,) = runner.run_sequence(
+        (("uninstall", fixture.source),),
+        expected_returncodes=(1,),
+        scenario_id="lsp-uninstall-cleanup-refusal",
+        cwd=fixture.project_root,
+        env=environment,
+    )
+
+    assert plugin_path.read_bytes() == foreign
+    normalized_output = " ".join(result.stdout.split())
+    assert "Uninstall incomplete" in normalized_output
+    assert "'apm install'" in normalized_output
+
+
 def test_saved_target_drives_package_mcp_lsp_update_audit_and_uninstall(
     tmp_path: Path,
     apm_binary_path: Path,
@@ -996,12 +1341,14 @@ def test_saved_target_drives_package_mcp_lsp_update_audit_and_uninstall(
         env=environment,
     )
     claude_mcp = fixture.project_root / ".mcp.json"
-    claude_lsp = fixture.project_root / ".lsp.json"
+    claude_lsp = fixture.project_root / _CLAUDE_LSP_PLUGIN
+    claude_lsp_plugin_dir = claude_lsp.parent
+    claude_lsp_dir = claude_lsp_plugin_dir.parent
     claude_instruction = (
         fixture.project_root / ".claude" / "rules" / "saved-target-source-instruction.md"
     )
     assert server_name in json.loads(claude_mcp.read_text(encoding="utf-8"))["mcpServers"]
-    assert lsp_name in json.loads(claude_lsp.read_text(encoding="utf-8"))
+    assert lsp_name in json.loads(claude_lsp.read_text(encoding="utf-8"))["lspServers"]
     assert claude_instruction.is_file()
 
     first_mcp = claude_mcp.read_bytes()
@@ -1026,7 +1373,7 @@ def test_saved_target_drives_package_mcp_lsp_update_audit_and_uninstall(
         env=environment,
     )
     assert server_name in json.loads(claude_mcp.read_text(encoding="utf-8"))["mcpServers"]
-    assert lsp_name in json.loads(claude_lsp.read_text(encoding="utf-8"))
+    assert lsp_name in json.loads(claude_lsp.read_text(encoding="utf-8"))["lspServers"]
 
     source_manifest = load_yaml(fixture.repository.worktree / "apm.yml")
     source_manifest["version"] = "0.2.0"
@@ -1055,7 +1402,11 @@ def test_saved_target_drives_package_mcp_lsp_update_audit_and_uninstall(
     )
     assert claude_instruction.is_file()
     assert server_name in json.loads(claude_mcp.read_text(encoding="utf-8"))["mcpServers"]
-    assert lsp_name in json.loads(claude_lsp.read_text(encoding="utf-8"))
+    assert lsp_name in json.loads(claude_lsp.read_text(encoding="utf-8"))["lspServers"]
+    unrelated_claude_skill = fixture.project_root / ".claude" / "skills" / "local-skill"
+    unrelated_claude_skill.mkdir(parents=True)
+    unrelated_skill_file = unrelated_claude_skill / "README.md"
+    unrelated_skill_file.write_text("local Claude skill\n", encoding="utf-8")
     runner.run_sequence(
         (install, ("audit", "--ci")),
         expected_returncodes=(0, 0),
@@ -1065,13 +1416,20 @@ def test_saved_target_drives_package_mcp_lsp_update_audit_and_uninstall(
     )
 
     runner.run_sequence(
-        (("uninstall", fixture.source), install),
-        expected_returncodes=(0, 0),
+        (("uninstall", fixture.source),),
+        expected_returncodes=(0,),
         scenario_id="saved-target-uninstall-reconcile",
         cwd=fixture.project_root,
         env=environment,
     )
     assert not claude_instruction.exists()
+    post_uninstall_lock = LockFile.read(fixture.project_root / "apm.lock.yaml")
+    assert not claude_lsp.exists(), (
+        post_uninstall_lock.lsp_config_provenance if post_uninstall_lock is not None else None
+    )
+    assert not claude_lsp_plugin_dir.exists()
+    assert not claude_lsp_dir.exists()
+    assert unrelated_skill_file.read_text(encoding="utf-8") == "local Claude skill\n"
 
     runner.run_sequence(
         (
@@ -1144,9 +1502,22 @@ def test_saved_target_drives_user_scope_package_mcp_and_lsp(
         env=environment,
     )
     claude_config = json.loads((isolated.home / ".claude.json").read_text(encoding="utf-8"))
+    claude_lsp_plugin = json.loads((isolated.home / _CLAUDE_LSP_PLUGIN).read_text(encoding="utf-8"))
     assert "saved-target-user-mcp" in claude_config["mcpServers"]
-    assert "saved-target-user-lsp" in claude_config["lspServers"]
+    assert "saved-target-user-lsp" in claude_lsp_plugin["lspServers"]
+    assert claude_lsp_plugin["name"] == "apm-lsp"
     assert (isolated.home / ".claude" / "rules" / "saved-target-user-instruction.md").is_file()
+
+    runner.run_sequence(
+        (("uninstall", "--global", str(package.root)),),
+        expected_returncodes=(0,),
+        scenario_id="saved-target-user-uninstall",
+        cwd=cwd,
+        env=environment,
+    )
+
+    assert not (isolated.home / _CLAUDE_LSP_PLUGIN).exists()
+    assert not (isolated.home / ".claude" / "skills" / "apm-lsp").exists()
 
 
 def test_saved_target_drives_direct_mcp_without_target_flag(
@@ -1825,10 +2196,10 @@ def test_saved_target_drives_declared_mcp_and_lsp_without_package(
     )
 
     assert (project.root / ".mcp.json").is_file()
-    assert (project.root / ".lsp.json").is_file()
+    assert (project.root / _CLAUDE_LSP_PLUGIN).is_file()
 
     (project.root / ".mcp.json").unlink()
-    (project.root / ".lsp.json").unlink()
+    (project.root / _CLAUDE_LSP_PLUGIN).unlink()
     runner.run_sequence(
         (("update", "--yes"),),
         expected_returncodes=(0,),
@@ -1837,7 +2208,7 @@ def test_saved_target_drives_declared_mcp_and_lsp_without_package(
         env=environment,
     )
     assert (project.root / ".mcp.json").is_file()
-    assert (project.root / ".lsp.json").is_file()
+    assert (project.root / _CLAUDE_LSP_PLUGIN).is_file()
 
     manifest = load_yaml(project.manifest_path)
     manifest["dependencies"].pop("mcp")
@@ -1854,9 +2225,7 @@ def test_saved_target_drives_declared_mcp_and_lsp_without_package(
         "saved-declared-mcp"
         not in json.loads((project.root / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     )
-    assert "saved-declared-lsp" not in json.loads(
-        (project.root / ".lsp.json").read_text(encoding="utf-8")
-    )
+    assert not (project.root / _CLAUDE_LSP_PLUGIN).exists()
 
 
 def test_saved_copilot_target_projects_to_copilot_for_direct_mcp(
@@ -2053,7 +2422,7 @@ def test_lsp_write_failure_is_nonzero(
             },
         ),
     )
-    (project.root / ".lsp.json").mkdir()
+    (project.root / _CLAUDE_LSP_PLUGIN).mkdir(parents=True)
     runner = _runner(apm_binary_path)
     environment = isolated.subprocess_env()
     runner.run_sequence(
@@ -2121,7 +2490,7 @@ def test_manifest_and_explicit_target_precedence_for_mcp_and_lsp(
     assert (project.root / ".github" / "mcp.json").is_file()
     assert (project.root / ".github" / "lsp.json").is_file()
     assert not (project.root / ".mcp.json").exists()
-    assert not (project.root / ".lsp.json").exists()
+    assert not (project.root / _CLAUDE_LSP_PLUGIN).exists()
 
     runner.run_sequence(
         (("install", "--target", "claude", "--no-policy"),),
@@ -2131,7 +2500,7 @@ def test_manifest_and_explicit_target_precedence_for_mcp_and_lsp(
         env=environment,
     )
     assert (project.root / ".mcp.json").is_file()
-    assert (project.root / ".lsp.json").is_file()
+    assert (project.root / _CLAUDE_LSP_PLUGIN).is_file()
 
 
 def test_multi_target_exclusion_applies_to_mcp_and_lsp(
@@ -2182,7 +2551,7 @@ def test_multi_target_exclusion_applies_to_mcp_and_lsp(
     )
 
     assert (project.root / ".mcp.json").is_file()
-    assert (project.root / ".lsp.json").is_file()
+    assert (project.root / _CLAUDE_LSP_PLUGIN).is_file()
     assert not (project.root / ".vscode" / "mcp.json").exists()
     assert not (project.root / ".github" / "lsp.json").exists()
 
@@ -2230,7 +2599,7 @@ def test_explicit_runtime_alias_overrides_saved_target_for_all_phases(
     )
 
     assert (project.root / ".mcp.json").is_file()
-    assert (project.root / ".lsp.json").is_file()
+    assert (project.root / _CLAUDE_LSP_PLUGIN).is_file()
     assert not (project.root / ".vscode" / "mcp.json").exists()
     assert not (project.root / ".github" / "lsp.json").exists()
 
@@ -2315,7 +2684,7 @@ def test_frozen_failure_writes_no_package_or_service_state(
     assert not (fixture.project_root / "apm_modules").exists()
     assert not (fixture.project_root / ".claude").exists()
     assert not (fixture.project_root / ".mcp.json").exists()
-    assert not (fixture.project_root / ".lsp.json").exists()
+    assert not (fixture.project_root / _CLAUDE_LSP_PLUGIN).exists()
 
 
 def test_unresolved_package_services_fail_before_package_deployment(
@@ -2359,7 +2728,7 @@ def test_unresolved_package_services_fail_before_package_deployment(
     modules = fixture.project_root / "apm_modules"
     assert not modules.exists() or not any(modules.rglob("*"))
     assert not (fixture.project_root / ".mcp.json").exists()
-    assert not (fixture.project_root / ".lsp.json").exists()
+    assert not (fixture.project_root / _CLAUDE_LSP_PLUGIN).exists()
 
 
 def test_uninstalling_one_shared_root_retains_shared_dependency_ownership(

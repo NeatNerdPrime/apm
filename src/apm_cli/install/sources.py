@@ -431,7 +431,12 @@ class CachedDependencySource(DependencySource):
             PackageType,
             ResolvedReference,
         )
-        from apm_cli.models.validation import detect_package_type, validate_apm_package
+        from apm_cli.models.validation import (
+            detect_package_type,
+            gather_detection_evidence,
+            validate_apm_package,
+            validate_legacy_marketplace_plugin,
+        )
         from apm_cli.utils.content_hash import compute_package_hash as _compute_hash
 
         ctx = self.ctx
@@ -516,17 +521,25 @@ class CachedDependencySource(DependencySource):
         else:
             apm_yml_path = install_path / APM_YML_FILENAME
             pkg_type, _ = detect_package_type(install_path)
+            detection_evidence = gather_detection_evidence(install_path)
             if (
-                pkg_type == PackageType.MARKETPLACE_PLUGIN
+                detection_evidence.has_plugin_manifest
                 and apm_yml_path.exists()
                 and not has_normalized_plugin_skill_sources_receipt(install_path)
             ):
-                validation_result = validate_apm_package(install_path, source_path=install_path)
+                validation_result = validate_legacy_marketplace_plugin(
+                    install_path,
+                    detection_evidence.plugin_json_path,
+                    source_path=install_path,
+                )
                 if not validation_result.is_valid or validation_result.package is None:
                     details = "; ".join(validation_result.errors) or "validator returned no package"
-                    raise DirectDependencyError(f"Cached Claude Plugin is invalid: {details}")
+                    raise DirectDependencyError(
+                        f"Cached Claude Plugin '{dep_key}' at '{install_path}' is invalid: "
+                        f"{details}. Remove the cached directory or run 'apm deps clean --yes', "
+                        "then retry."
+                    )
                 cached_package = validation_result.package
-                pkg_type = validation_result.package_type
             elif apm_yml_path.exists():
                 cached_package = APMPackage.from_apm_yml(
                     apm_yml_path,

@@ -82,6 +82,7 @@ from ..install.errors import (
     PolicyViolationError,
     RequiredIntegrationError,
 )
+from ..install.locking import serialized_lifecycle
 from ..install.plan import UpdatePlan, render_plan_text
 from ..utils.console import _rich_echo, _rich_error, _rich_info, _rich_success, _rich_warning
 from ._helpers import UnknownPackageError, _find_apm_yml, resolve_requested_packages
@@ -230,6 +231,9 @@ def _run_mcp_lsp_integration(
     diagnostics: Any,
     logger: InstallLogger,
     verbose: bool,
+    effective_allow_executables: dict[str, dict[str, bool]] | None = None,
+    effective_allow_resolved: bool = False,
+    force: bool = False,
 ) -> None:
     """Reconcile MCP and LSP servers against the current apm.yml.
 
@@ -310,6 +314,9 @@ def _run_mcp_lsp_integration(
         target_context=(mcp_apm_config, effective_target, scope),
         target_decision=target_decision,
         fail_on_write_error=True,
+        effective_allow_executables=effective_allow_executables,
+        effective_allow_resolved=effective_allow_resolved,
+        force=force,
     )
 
 
@@ -321,6 +328,7 @@ def _handle_service_only_update(
     dry_run: bool,
     logger: InstallLogger,
     verbose: bool,
+    force: bool,
 ) -> bool:
     """Reconcile service-only manifests and return whether update is complete."""
     if apm_package.has_any_apm_dependencies():
@@ -362,6 +370,7 @@ def _handle_service_only_update(
             diagnostics=None,
             logger=logger,
             verbose=verbose,
+            force=force,
         )
     except RequiredIntegrationError as exc:
         logger.error(str(exc))
@@ -442,6 +451,7 @@ def _handle_service_only_update(
     ),
 )
 @click.pass_context
+@serialized_lifecycle
 def update(
     ctx: click.Context,
     packages: tuple[str, ...],
@@ -556,6 +566,35 @@ def _run_dep_update(
     force: bool = False,
     parallel_downloads: int = 4,
 ) -> None:
+    """Serialize update with every other mutation of the same workspace."""
+    from apm_cli.core.scope import InstallScope
+
+    effective_scope = scope or InstallScope.PROJECT
+    _run_dep_update_locked(
+        assume_yes=assume_yes,
+        dry_run=dry_run,
+        verbose=verbose,
+        project_root=project_root,
+        target=target,
+        scope=effective_scope,
+        packages=packages,
+        force=force,
+        parallel_downloads=parallel_downloads,
+    )
+
+
+def _run_dep_update_locked(
+    *,
+    assume_yes: bool,
+    dry_run: bool,
+    verbose: bool,
+    project_root: Path | None = None,
+    target: str | list[str] | None = None,
+    scope=None,
+    packages: tuple[str, ...] = (),
+    force: bool = False,
+    parallel_downloads: int = 4,
+) -> None:
     """Core ``apm update`` flow: resolve, plan, prompt, install.
 
     When ``project_root`` is provided, the working directory is
@@ -609,6 +648,7 @@ def _run_dep_update(
         dry_run=dry_run,
         logger=logger,
         verbose=verbose,
+        force=force,
     ):
         return
 
@@ -834,6 +874,9 @@ def _run_dep_update(
                 diagnostics=getattr(result, "diagnostics", None),
                 logger=logger,
                 verbose=verbose,
+                effective_allow_executables=getattr(result, "exec_allow_map", None),
+                effective_allow_resolved=getattr(result, "exec_allow_resolved", False),
+                force=force,
             )
         except RequiredIntegrationError as e:
             logger.error(str(e))

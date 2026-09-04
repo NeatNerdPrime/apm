@@ -46,11 +46,11 @@ With no arguments it installs everything from `apm.yml`. With one or more `PACKA
 
 | Flag | Default | Description |
 |---|---|---|
-| `--target`, `-t VALUE` | auto-detect | Force deployment targets. Comma-separated for multiple (`-t claude,cursor`). Values: `copilot`, `claude`, `grok-build`, `cursor`, `opencode`, `codex`, `gemini`, `antigravity`, `windsurf`, `kiro`, `intellij`, `vscode`, `agent-skills`, `all`; experimental `copilot-cowork`, `copilot-app`, `grok-cloud` (skills only), and `hermes` are also accepted when enabled. IntelliJ-specific integration is MCP-only and writes JetBrains Copilot's user-scope MCP config; package file primitives use the Copilot profile. `all` excludes `agent-skills`, `antigravity`, `intellij`, and all experimental targets; combine them explicitly to add them, for example `all,intellij`. Explicit MCP target lists are exact: `intellij,claude` writes only those two MCP configs. See the precedence note below. With nothing to detect, install exits `2` with a teaching message. |
+| `--target`, `-t VALUE` | auto-detect | Force deployment targets. Comma-separated for multiple (`-t claude,cursor`). Values: `copilot`, `claude`, `grok-build`, `cursor`, `opencode`, `codex`, `gemini`, `antigravity`, `windsurf`, `kiro`, `intellij`, `vscode`, `agent-skills`, `hermes`, `all`; experimental `copilot-cowork`, `copilot-app`, and `grok-cloud` (skills only) are also accepted when enabled. Hermes is stable but explicit-only. IntelliJ-specific integration is MCP-only and writes JetBrains Copilot's user-scope MCP config; package file primitives use the Copilot profile. `all` excludes `agent-skills`, `antigravity`, `hermes`, `intellij`, and all experimental targets; combine them explicitly to add them, for example `all,hermes`. Explicit MCP target lists are exact: `intellij,claude` writes only those two MCP configs. See the precedence note below. With nothing to detect, install exits `2` with a teaching message. |
 | `--runtime VALUE` | unset | Legacy alias for `--target` (single value only). Still accepted; prefer `--target`. |
 | `--exclude VALUE` | unset | Skip one runtime from the resolved MCP/LSP target set (explicit selection, manifest, saved config, or auto-detection). |
-| `--only apm\|mcp` | both | Install only APM packages or only MCP servers. |
-| `-g`, `--global` | off | Install to user scope (`~/.apm/`) instead of the current project. `apm install -g --mcp NAME` creates or updates `~/.apm/apm.yml`, then deploys only to global-capable runtimes, such as Copilot CLI, Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Kiro, Windsurf, JetBrains Copilot, and Hermes when enabled. Mixed selections skip workspace-only targets with a warning. A selection with no global-capable target exits `2` before changing the user manifest, lockfile, or runtime configuration. |
+| `--only apm\|mcp` | both | Install only APM packages or MCP/LSP service dependencies. Use `--only=apm` to skip service configuration and `--only=mcp` to select MCP and LSP services only. |
+| `-g`, `--global` | off | Install to user scope (`~/.apm/`) instead of the current project. `apm install -g --mcp NAME` creates or updates `~/.apm/apm.yml`, then deploys only to global-capable runtimes, such as Copilot CLI, Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Hermes, Kiro, Windsurf, and JetBrains Copilot. Mixed selections skip workspace-only targets with a warning. A selection with no global-capable target exits `2` before changing the user manifest, lockfile, or runtime configuration. |
 | `--legacy-skill-paths` | off | Deploy skills to per-client paths (`.cursor/skills/`, `.github/skills/`, ...) instead of the converged `.agents/skills/`. Env: `APM_LEGACY_SKILL_PATHS=1`. |
 
 File primitives resolve targets in this order: `--target`, manifest
@@ -112,13 +112,18 @@ in `apm.yml`, then run `apm install` again.
 | `--env KEY=VALUE` | unset | Environment variable for stdio MCP servers. Repeatable. |
 | `--header KEY=VALUE` | unset | HTTP header for remote MCP servers. Repeatable. Requires `--url`. |
 | `--mcp-version VER` | unset | Pin a registry MCP entry to a specific version. |
-| `--registry URL` | `https://api.mcp.github.com` | Custom MCP registry URL for resolving `--mcp NAME`. Persisted to `apm.yml`. Overrides `MCP_REGISTRY_URL`. Not valid with `--url` or a stdio command. |
+| `--registry URL` | resolved | Custom MCP registry URL for resolving `--mcp NAME`. Persisted to `apm.yml`. Resolution order: this flag, `MCP_REGISTRY_URL`, `apm config set mcp-registry-url`, then the public default. Not valid with `--url` or a stdio command. |
 
 ## Behavior
 
 - **Auto-bootstrap.** `apm install <pkg>` with no `apm.yml` creates a minimal one. Its name comes from the current directory (or home directory for global installs) and falls back to `my-project` if that derived name is invalid. Bare `apm install` with no `apm.yml` exits with a hint to run `apm init` or `apm install <org/repo>`.
 - **Target persistence on bootstrap.** When `--target` maps to recognized manifest targets, those target(s) are persisted to the new manifest's `targets:` field so a later bare `apm update` redeploys to the same targets without re-specifying `--target`.
 - **One effective target.** Package primitives, MCP servers, and LSP servers consume one target decision per invocation: `--target` > `apm.yml targets:` > `apm config set target ...` > auto-detect. A saved target therefore applies to `apm install`, `apm install --mcp`, and later `apm update` runs without another flag.
+- **Claude LSP discovery.** Project installs write the APM-managed plugin at
+  `.claude/skills/apm-lsp/.claude-plugin/plugin.json`; global installs write
+  `~/.claude.json`. Existing project-root `.lsp.json` files are preserved for
+  manual review because they may contain user-owned entries. See
+  [Install LSP servers](../../../consumer/install-lsp-servers/).
 - **Required service writes fail loudly.** If MCP or LSP work is declared but no target can be resolved, install exits non-zero before changing the manifest, package deployment, or native service config. A native MCP/LSP config write failure also exits non-zero with the failed target and a permissions/path next step. A successful direct `--mcp` add never reports `Install interrupted`.
 - **Direct registry lookup fails closed.** Registry-form MCP entries (`apm install --mcp NAME` with no `--url` and no post-`--` command) resolve one unique registry identity before writing the manifest or user config. An unreachable registry, missing identity, or ambiguous bare server name exits non-zero without changing state.
 - **Diff-aware.** Packages whose ref or version changed in `apm.yml` are re-downloaded automatically. MCP servers with matching config are skipped (`already configured`); changed config is re-applied (`updated`).

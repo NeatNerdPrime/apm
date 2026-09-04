@@ -585,6 +585,40 @@ class TestCachedDependencySourceAcquire:
         assert plugin_json.read_text(encoding="utf-8") == "{bad json"
         assert not (install_path / "apm.yml").exists()
 
+    def test_receiptless_plugin_error_identifies_cache_and_recovery(self, tmp_path: Path) -> None:
+        """Invalid legacy caches name the dependency, path, and recovery action."""
+        from apm_cli.install.errors import DirectDependencyError
+        from apm_cli.models.apm_package import PackageType
+
+        ctx = _make_ctx(targets=["copilot"])
+        dep_ref = _make_dep_ref(is_virtual=False)
+        install_path = tmp_path / "cached-plugin"
+        install_path.mkdir()
+        (install_path / "apm.yml").write_text("name: cached-plugin\n", encoding="ascii")
+        invalid = MagicMock(is_valid=False, package=None, errors=["invalid metadata"])
+        evidence = MagicMock(has_plugin_manifest=True)
+
+        with (
+            patch("apm_cli.bundle.local_bundle.route_agent_plugin_package", return_value=None),
+            patch(
+                "apm_cli.models.validation.detect_package_type",
+                return_value=(PackageType.SKILL_BUNDLE, None),
+            ),
+            patch("apm_cli.models.validation.gather_detection_evidence", return_value=evidence),
+            patch(
+                "apm_cli.models.validation.validate_legacy_marketplace_plugin",
+                return_value=invalid,
+            ),
+        ):
+            source = self._make_source(ctx, dep_ref, install_path, dep_key="owner/cached-plugin")
+            with pytest.raises(DirectDependencyError) as exc_info:
+                source.acquire()
+
+        message = str(exc_info.value)
+        assert "owner/cached-plugin" in message
+        assert str(install_path) in message
+        assert "apm deps clean --yes" in message
+
     def test_with_targets_and_apm_yml(self, tmp_path: Path) -> None:
         """Happy path: apm.yml present → full Materialization returned."""
         ctx = _make_ctx(targets=["copilot"])

@@ -263,7 +263,7 @@ class TestMapPluginArtifacts:
         assert not (apm_dir / "skills" / "alpha").exists()
         assert not (apm_dir / "skills" / "beta").exists()
 
-    def test_skill_receipt_presence_rejects_symlink(self, tmp_path):
+    def test_skill_receipt_presence_rejects_symlinked_paths(self, tmp_path):
         plugin_dir = tmp_path / "plugin"
         apm_dir = plugin_dir / ".apm"
         apm_dir.mkdir(parents=True)
@@ -273,6 +273,15 @@ class TestMapPluginArtifacts:
             (apm_dir / ".plugin-skill-sources.json").symlink_to(external)
         except OSError:
             pytest.skip("Symlinks not supported on this platform")
+
+        assert not has_normalized_plugin_skill_sources_receipt(plugin_dir)
+
+        (apm_dir / ".plugin-skill-sources.json").unlink()
+        apm_dir.rmdir()
+        external_apm = tmp_path / "external-apm"
+        external_apm.mkdir()
+        (external_apm / ".plugin-skill-sources.json").write_text("{}", encoding="ascii")
+        apm_dir.symlink_to(external_apm, target_is_directory=True)
 
         assert not has_normalized_plugin_skill_sources_receipt(plugin_dir)
 

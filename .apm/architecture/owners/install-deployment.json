@@ -65,6 +65,16 @@
       "guards": ["install-deployment-source-plan"]
     },
     {
+      "id": "bundle-native-layout-lowering",
+      "decision": "Bundle-native directory and filename lowering to APM primitive kinds and target deploy layout",
+      "owner": "bundle/plugin_layout.py (PLUGIN_LAYOUT, plugin_command_prompt_name) consumed by install/local_bundle_paths.py (_lower_to_target)",
+      "selectors": [
+        "src/apm_cli/bundle/plugin_layout.py",
+        "src/apm_cli/install/local_bundle_paths.py"
+      ],
+      "guards": ["install-deployment-bundle-native-layout"]
+    },
+    {
       "id": "install-invocation-option-defaults",
       "decision": "Install invocation option defaults",
       "owner": "install/request.py (InstallRequest)",
@@ -79,11 +89,39 @@
       "guards": ["install-deployment-install-scope-selection"]
     },
     {
+      "id": "mcp-registry-url-resolution",
+      "decision": "MCP registry URL resolution precedence",
+      "owner": "registry/client.py (resolve_mcp_registry_url)",
+      "selectors": ["src/apm_cli/registry/client.py"],
+      "guards": ["install-deployment-mcp-registry-resolution"]
+    },
+    {
       "id": "file-level-deploy-sync-cleanup",
       "decision": "File-level deploy / sync / cleanup",
       "owner": "BaseIntegrator (see integrators.instructions.md)",
       "selectors": ["src/apm_cli/integration/base_integrator.py"],
       "guards": ["install-deployment-base-integrator"]
+    },
+    {
+      "id": "executable-trust-context",
+      "decision": "Executable trust context and per-package approval",
+      "owner": "security/executables.py (exec_trust_context_for_project, resolve_exec_decision)",
+      "selectors": ["src/apm_cli/security/executables.py"],
+      "guards": ["install-deployment-executable-trust-context"]
+    },
+    {
+      "id": "lsp-target-contract",
+      "decision": "LSP target path, shape, and reserved Claude namespace",
+      "owner": "integration/lsp_integrator.py (LSPIntegrator)",
+      "selectors": ["src/apm_cli/integration/lsp_integrator.py"],
+      "guards": ["install-deployment-lsp-target-contract"]
+    },
+    {
+      "id": "lsp-lifecycle",
+      "decision": "LSP lifecycle orchestration and reconciliation",
+      "owner": "install/lsp/integration.py",
+      "selectors": ["src/apm_cli/install/lsp/integration.py"],
+      "guards": ["install-deployment-lsp-lifecycle"]
     },
     {
       "id": "post-uninstall-dependency-reachability",
@@ -98,6 +136,13 @@
       "owner": "install/audit_replay.py (prepare_ci_audit_replay)",
       "selectors": ["src/apm_cli/install/audit_replay.py"],
       "guards": ["install-deployment-audit-replay"]
+    },
+    {
+      "id": "cross-process-lifecycle-serialization",
+      "decision": "Cross-process lifecycle mutation serialization",
+      "owner": "install/locking.py (lifecycle_operation, serialized_lifecycle)",
+      "selectors": ["src/apm_cli/install/locking.py"],
+      "guards": ["install-deployment-lifecycle-serialization"]
     },
     {
       "id": "dependency-cli-selection",

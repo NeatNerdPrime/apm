@@ -615,10 +615,12 @@ contracts-tooling-project-yaml-write-delegation
 install-deployment-approval-outcome-routing
 install-deployment-audit-policy-discovery
 install-deployment-audit-replay
+install-deployment-bundle-native-layout
 install-deployment-base-integrator
 install-deployment-cached-claude-skill-metadata
 install-deployment-dependency-winner-selection
 install-deployment-deployment-frame-projection
+install-deployment-executable-trust-context
 install-deployment-frozen-mutation-eligibility
 install-deployment-git-object-field-authority
 install-deployment-gitlab-facade-orchestration
@@ -628,9 +630,13 @@ install-deployment-install-scope-selection
 install-deployment-local-bundle-policy-preflight
 install-deployment-local-identity-anchor
 install-deployment-locked-skill-subset-reconstruction
+install-deployment-lsp-lifecycle
+install-deployment-lsp-target-contract
 install-deployment-manifest-inheritance-includes
 install-deployment-marketplace-mutation-lock
+install-deployment-lifecycle-serialization
 install-deployment-mcp-ownership-migration
+install-deployment-mcp-registry-resolution
 install-deployment-outcome
 install-deployment-package-target-authorization
 install-deployment-plugin-bin-eligibility
@@ -660,6 +666,7 @@ marketplace-integrations-metadata-enrichment
 marketplace-integrations-native-registration
 marketplace-integrations-output-path
 marketplace-integrations-package-construction
+marketplace-integrations-package-format-precedence
 marketplace-integrations-package-projection
 marketplace-integrations-producer-admission
 marketplace-integrations-projection-boundary

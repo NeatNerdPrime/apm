@@ -21,6 +21,7 @@ from typing import Any
 
 import yaml
 
+from ..bundle.plugin_layout import plugin_command_prompt_name
 from ..utils.atomic_io import atomic_write_text, write_text_lf
 from ..utils.console import _rich_warning
 from ..utils.path_security import PathTraversalError, ensure_path_within
@@ -354,8 +355,9 @@ def normalized_plugin_skill_sources(plugin_path: Path) -> tuple[dict[str, Path],
 
 def has_normalized_plugin_skill_sources_receipt(plugin_path: Path) -> bool:
     """Return whether parser-owned plugin skill membership is present."""
-    receipt = plugin_path.resolve() / ".apm" / _PLUGIN_SKILL_SOURCES_FILE
-    return receipt.is_file() and not receipt.is_symlink()
+    apm_dir = plugin_path.resolve() / ".apm"
+    receipt = apm_dir / _PLUGIN_SKILL_SOURCES_FILE
+    return not apm_dir.is_symlink() and receipt.is_file() and not receipt.is_symlink()
 
 
 def _write_plugin_skill_sources(
@@ -605,7 +607,7 @@ def synthesize_apm_yml_from_plugin(
         substitute_plugin_root=substitute_plugin_root,
     )
     if lsp_servers:
-        lsp_deps = _lsp_servers_to_apm_deps(
+        lsp_deps = lsp_servers_to_apm_deps(
             lsp_servers,
             plugin_path,
             warn_on_invalid=warn_on_invalid_servers,
@@ -971,7 +973,7 @@ def _read_lsp_json(path: Path, logger: logging.Logger) -> dict[str, Any]:
     return dict(data)
 
 
-def _lsp_servers_to_apm_deps(
+def lsp_servers_to_apm_deps(
     servers: dict[str, Any],
     plugin_path: Path,
     *,
@@ -1083,6 +1085,9 @@ def _lsp_servers_to_apm_deps(
         deps.append(dep)
 
     return deps
+
+
+_lsp_servers_to_apm_deps = lsp_servers_to_apm_deps
 
 
 def _map_plugin_artifacts(
@@ -1244,8 +1249,7 @@ def _map_plugin_artifacts(
                 target_path = dest_dir / relative_path
             else:
                 target_path = dest_dir / source_file.name
-            if not source_file.name.endswith(".prompt.md") and source_file.suffix == ".md":
-                target_path = target_path.with_name(f"{source_file.stem}.prompt.md")
+            target_path = target_path.with_name(plugin_command_prompt_name(source_file.name))
             target_path.parent.mkdir(parents=True, exist_ok=True)
             if _is_same_path(source_file, target_path):
                 return
