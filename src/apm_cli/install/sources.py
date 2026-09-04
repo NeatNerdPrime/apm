@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from apm_cli.install.errors import DirectDependencyError
+from apm_cli.install.primitive_classification import warn_unrecognized_plugin_schema
 from apm_cli.install.registry_wiring import (
     get_registry_resolver,
     registry_resolution_for_cached_registry_dep,
@@ -288,6 +289,7 @@ class LocalDependencySource(DependencySource):
         else:
             details = "; ".join(validation.errors) or "validator returned no package"
             raise DirectDependencyError(f"Local package is invalid: {details}")
+        warn_unrecognized_plugin_schema(diagnostics, dep_key, install_path)
         if not local_pkg.source:
             local_pkg.source = dep_ref.local_path
 
@@ -615,6 +617,7 @@ class CachedDependencySource(DependencySource):
         if cached_package_info.package_type:
             ctx.package_types[dep_key] = cached_package_info.package_type.value
         _record_declared_license(ctx, dep_key, install_path)
+        warn_unrecognized_plugin_schema(ctx.diagnostics, dep_key, install_path)
 
         # Return without deploying integration files when the target set is empty.
         if not ctx.targets and native_validation is None:
@@ -725,7 +728,7 @@ class FreshDependencySource(DependencySource):
                         f"no registry resolver was constructed (apm.yml may "
                         f"be missing a 'registries:' block)."
                     )
-                # Lockfile re-install path: registry_name might be absent —
+                # Lockfile re-install path: registry_name might be absent -
                 # look it up from the lockfile's resolved_url.
                 from apm_cli.deps.registry.auth import (
                     dependency_ref_with_registry_name_from_lockfile,
@@ -828,7 +831,7 @@ class FreshDependencySource(DependencySource):
             _is_dev = node.is_dev if node else False
             # Registry-sourced deps: pull the captured resolution out of
             # the resolver's per-graph map so the lockfile records
-            # resolved_url + resolved_hash + version (design §6.1).
+            # resolved_url + resolved_hash + version (design sec. 6.1).
             _registry_resolution = (
                 resolver_last_registry_resolution(ctx, dep_key)
                 if dep_ref.source == "registry"
@@ -900,6 +903,7 @@ class FreshDependencySource(DependencySource):
             if hasattr(package_info, "package_type") and package_info.package_type:
                 ctx.package_types[dep_key] = package_info.package_type.value
             _record_declared_license(ctx, dep_key, install_path)
+            warn_unrecognized_plugin_schema(diagnostics, dep_key, install_path)
 
             if hasattr(package_info, "package_type"):
                 package_type = package_info.package_type

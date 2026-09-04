@@ -640,6 +640,7 @@ install-deployment-mcp-registry-resolution
 install-deployment-outcome
 install-deployment-package-target-authorization
 install-deployment-plugin-bin-eligibility
+install-deployment-primitive-classification
 install-deployment-prospective-dry-run-plan
 install-deployment-provenance-state
 install-deployment-ref-recheck-ownership
@@ -710,6 +711,7 @@ registry_delegation.target_vocabulary
 transport-platform-artifactory-full-commit-sha
 transport-platform-artifactory-netrc-isolation
 transport-platform-git-cache-identity
+transport-platform-git-child-environment
 transport-platform-git-semver-preflight
 transport-platform-github-throttle
 transport-platform-host-credential-resolution
