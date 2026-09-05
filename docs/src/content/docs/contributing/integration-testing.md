@@ -44,6 +44,9 @@ APM uses a tiered approach to integration testing:
 - **Full-coverage path**: merge-group workflow `ci-integration.yml`, job `integration-tests-shard`, step `Run integration tests (sharded + parallelized)`, calls `uv run ./scripts/test-integration.sh`; that script runs unfiltered `pytest tests/integration/`, so the complete lifecycle family remains exercised.
 - **Drift guard**: `tests/quality/test_ci_topology.py` independently collects the full, merge-group-only, and required selections; verifies their set partition; and preserves the required expression, full-integration execution path, step-level `APM_E2E_TESTS: "1"` binding, network/credential prohibitions, and required-check membership.
 - **Fixture controls**: lifecycle helpers set `APM_TEST_LOOPBACK_PORTS` for a port-scoped local registry and `APM_TEST_FAIL_LOCK_REPLACE=1` for atomic-write fault injection. These are internal test controls, not user-facing APM settings.
+- **Learning ledger**: `tests/fixtures/lifecycle_bug_ledger.json` records representative escaped defects, their generalized laws, oracle tiers, implementation phases, and executable regression node IDs. It is deliberately not a bug-count census; `tests/quality/test_lifecycle_bug_ledger.py` validates its taxonomy and links in the required ratchet job.
+- **Generated lifecycle model**: `test_generated_lifecycle_state_machine.py` uses Hypothesis to generate guarded install, dry-run, audit, tamper, repair, declaration, and prune sequences against the real CLI. The model tracks declaration, materialization, integrity, and lock state independently of the product lockfile. Every transition captures complete project and user roots, and mutating commands must stay inside reviewed write sets. It stays in the merge-group family until hosted runtime supports promotion to the bounded PR-time smoke set.
+- **Known gap**: a late lockfile replacement failure can leave target files on the newly declared target while retaining the prior lockfile. The required lifecycle suite bounds that blast radius and proves the next install converges; expanding the install transaction is a separate design decision recorded in the ledger.
 - **Run it locally** (the exact command CI runs):
   ```bash
   APM_E2E_TESTS=1 uv run --extra dev pytest -p no:cacheprovider -q --strict-markers \
@@ -170,6 +173,11 @@ uv run pytest tests/integration/test_golden_scenario_e2e.py -v
 
 # Run only a marker family
 uv run pytest tests/integration -m requires_github_token -v
+
+# Run the bounded generated lifecycle model with a real local apm command
+APM_E2E_TESTS=1 APM_BINARY_PATH="$(command -v apm)" \
+  uv run --extra dev pytest -q \
+  tests/integration/test_generated_lifecycle_state_machine.py
 ```
 
 ### Hermetic lifecycle fixtures
@@ -190,6 +198,19 @@ contract. Complete the [development setup](../development-guide/) first.
 Source fixtures author only source inputs; the real APM CLI creates lockfiles,
 deployed trees, compiled output, bundles, hashes, cache state, and audit
 reports.
+
+Use `ArtifactSnapshot` for one complete filesystem root and
+`ArtifactSnapshotSet` when an operation can affect multiple isolated roots.
+These open-world captures complement `LifecycleStateSnapshot`: the latter
+explains semantic lock and deployment state, while the former catches stray
+files even when the lockfile fails to record them.
+
+Hypothesis failures print a minimized transition program that can be replayed
+by running the failing test with the reported example. Keep the generated model
+bounded and deterministic in CI (`database=None`, `derandomize=True`), and turn
+every confirmed product defect into a named regression before extending the
+ledger. The static scenario rows remain valuable for exact reproductions; the
+generated model searches valid orderings that authored rows may miss.
 
 `IsolatedApmEnvironment` builds deterministic child environments for APM and
 its Git/GitHub/ADO/GitLab/SSH flows, then installs a best-effort Python socket

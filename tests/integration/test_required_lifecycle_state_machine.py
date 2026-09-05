@@ -17,7 +17,12 @@ from apm_cli.integration.targets import KNOWN_TARGETS
 from apm_cli.utils.content_hash import compute_package_hash
 from apm_cli.utils.yaml_io import dump_yaml, load_yaml
 from tests.utils.apm_lifecycle_runner import ApmLifecycleRunner, CommandResult
-from tests.utils.artifact_snapshot import ArtifactSnapshot, assert_unchanged
+from tests.utils.artifact_snapshot import (
+    ArtifactSnapshot,
+    ArtifactSnapshotSet,
+    assert_only_snapshot_paths_changed,
+    assert_unchanged,
+)
 from tests.utils.isolated_apm_environment import IsolatedApmEnvironment
 from tests.utils.lifecycle_state import LifecycleStateRoot, LifecycleStateSnapshot
 from tests.utils.local_git_repository import (
@@ -1256,6 +1261,7 @@ def test_required_reinstall_is_byte_idempotent_across_durable_state(
         scenario_id="reinstall-idempotency-compile-first",
     )
     before = LifecycleStateSnapshot.capture(consumer.root, targets=("copilot",))
+    before_artifacts = ArtifactSnapshot.capture(consumer.root)
 
     _run_success(
         scenario,
@@ -1272,6 +1278,7 @@ def test_required_reinstall_is_byte_idempotent_across_durable_state(
         scenario_id="reinstall-idempotency-compile-second",
     )
     after = LifecycleStateSnapshot.capture(consumer.root, targets=("copilot",))
+    after_artifacts = ArtifactSnapshot.capture(consumer.root)
     _, audit = _audit(
         scenario,
         consumer,
@@ -1280,7 +1287,8 @@ def test_required_reinstall_is_byte_idempotent_across_durable_state(
     )
 
     _assert_same_state(before, after)
-    assert all("hook-sidecar" not in file.roles for file in after.files)
+    assert_unchanged(before_artifacts, after_artifacts)
+    assert after.file(".github/instructions/stable.instructions.md").kind == "file"
     assert audit["passed"] is True
 
 
@@ -2095,7 +2103,7 @@ def test_required_global_audit_rule_matrix_for_external_roots(
     assert final_audit["summary"]["failed"] == 0
 
 
-def test_required_failed_lock_write_releases_workspace_lock_and_preserves_state(
+def test_required_failed_lock_write_bounds_partial_state_and_recovers(
     tmp_path: Path,
     apm_binary_path: Path,
 ) -> None:
@@ -2123,6 +2131,12 @@ def test_required_failed_lock_write_releases_workspace_lock_and_preserves_state(
         ),
     }
     before_failure = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+    before_artifacts = ArtifactSnapshotSet.capture(
+        {
+            "project": consumer.root,
+            "user": scenario.isolated.home,
+        }
+    )
     failing_environment = dict(source.environment)
     failing_environment["APM_TEST_FAIL_LOCK_REPLACE"] = "1"
     failed = scenario.runner.run(
@@ -2133,7 +2147,38 @@ def test_required_failed_lock_write_releases_workspace_lock_and_preserves_state(
     )
     assert failed.returncode != 0, _result_evidence(failed)
     after_failure = LifecycleStateSnapshot.capture(consumer.root, **capture_args)
+    after_artifacts = ArtifactSnapshotSet.capture(
+        {
+            "project": consumer.root,
+            "user": scenario.isolated.home,
+        }
+    )
+    assert after_failure.manifest_bytes == before_failure.manifest_bytes
+    assert after_failure.deployment_records == before_failure.deployment_records
     assert after_failure.lockfile_bytes == before_failure.lockfile_bytes
+    assert after_failure.mcp_state_bytes == before_failure.mcp_state_bytes
+    assert after_failure.lsp_state_bytes == before_failure.lsp_state_bytes
+    assert after_failure.file(".agents/skills/lock-release/SKILL.md").kind == "missing"
+    assert (
+        after_failure.file(".claude/skills/lock-release/SKILL.md").content
+        == _skill("lock-release").encode()
+    )
+    assert_only_snapshot_paths_changed(
+        before_artifacts,
+        after_artifacts,
+        {
+            "project": {
+                ".agents",
+                ".agents/skills",
+                ".agents/skills/lock-release",
+                ".agents/skills/lock-release/SKILL.md",
+                ".claude",
+                ".claude/skills",
+                ".claude/skills/lock-release",
+                ".claude/skills/lock-release/SKILL.md",
+            }
+        },
+    )
     assert list(consumer.root.glob("apm-atomic-*")) == []
 
     _run_success(
