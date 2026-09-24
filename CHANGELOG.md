@@ -78,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The Unix installer now declares the prebuilt Linux glibc 2.38 minimum and routes older systems to the existing eligible Python/pip fallback before downloading an incompatible binary, with matching recovery guidance. (#2931)
 
+### Fixed
+
+- `apm marketplace check` now resolves bare `owner/repo` sources through the configured default host and standard authentication chain, so `GITHUB_APM_PAT` works consistently for private GitHub and GHES repositories. (#2917)
+
 ### Security
 
 - The shared gh-aw APM pack job now declares `contents: read` (previously `permissions: {}`), the minimum the explicit built-in-token path needs. No write scope is added, and the token is not forwarded to restore or agent jobs. (#2706)
