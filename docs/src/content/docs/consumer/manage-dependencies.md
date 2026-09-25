@@ -378,14 +378,20 @@ apm prune --dry-run   # preview what gets deleted
 apm prune             # delete orphaned packages from apm_modules/
 ```
 
-`apm prune` removes any directory in `apm_modules/` that no longer
-corresponds to a declared dependency or a transitive dependency still
-required by another package. It does not touch your manifest.
+`apm prune` removes unneeded recognized package roots in `apm_modules/`,
+including manifestless `SKILL.md` installs whose lock entries are already gone.
+It preserves declared direct/dev and retained transitive packages, bundled
+skills, and entire roots containing needed nested packages. Personal files
+inside a removable root are also removed; keep personal source outside
+`apm_modules/`. It does not touch your manifest.
 Lockfile entries, deployed harness files (`.github/`, `.claude/`, etc.),
 and merged hook configuration owned by the pruned package are all
 reconciled immediately by `apm prune` itself -- remaining direct and
 transitive packages keep their hooks; no follow-up `apm install` is
 required.
+
+See [`apm prune`](../../reference/cli/prune/) for the managed-root boundary
+and the separate ownership protections for deployed files.
 
 If you also want to refresh remaining deps to their latest versions or refs, see
 [Update and refresh](../update-and-refresh/).

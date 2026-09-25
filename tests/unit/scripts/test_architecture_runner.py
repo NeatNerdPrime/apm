@@ -641,6 +641,7 @@ install-deployment-marketplace-mutation-lock
 install-deployment-lifecycle-serialization
 install-deployment-mcp-ownership-migration
 install-deployment-mcp-registry-resolution
+install-deployment-orphan-selection
 install-deployment-outcome
 install-deployment-package-target-authorization
 install-deployment-plugin-bin-eligibility

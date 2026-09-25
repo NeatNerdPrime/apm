@@ -375,10 +375,13 @@ the two checks do not double-count.
 
 Orphan detection works in two directions:
 
-- **Orphan packages** - entries in `dependencies` that the manifest no longer
-  declares. `apm prune` removes them and their `deployed_files`.
+- **Orphan packages** - recognized roots under `apm_modules/` no longer needed
+  by the dependency graph, even when their lock entries are gone. `apm prune`
+  removes them while preserving bundles and roots containing needed children.
 - **Orphan files** - files under managed target directories that no lockfile
-  entry claims. `apm prune` removes them too.
+  entry claims. A ghost record alone does not authorize deleting these bytes.
+  Prune repairs ownership metadata; deletion still requires a pruned
+  dependency's trusted pre-transition claim and preserves surviving owners.
 
 `apm prune` is the only command that reconciles `deployments` rows. The valid
 owner universe and metadata-only repair boundary are defined in

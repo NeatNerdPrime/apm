@@ -32,7 +32,33 @@ _GUARD_RESOLUTION_REPLACEMENT = "install-deployment-resolution-replacement"
 
 
 _GUARD_UNINSTALL_SELECTION = "install-deployment-uninstall-selection"
+_GUARD_ORPHAN_SELECTION = "install-deployment-orphan-selection"
 _GUARD_IMMUTABLE_REQUIREMENTS = "install-deployment-immutable-requirements"
+
+
+def check_orphan_selection(provider: FactsProvider) -> tuple[Violation, ...]:
+    """Prune and advisory warnings share declaration-aware orphan selection."""
+    findings: list[Violation] = []
+    for path, scope in (
+        ("src/apm_cli/commands/_helpers.py", "_check_orphaned_packages"),
+        ("src/apm_cli/commands/prune.py", "prune"),
+    ):
+        facts, failures = _facts_for(provider, path, _GUARD_ORPHAN_SELECTION)
+        findings.extend(failures)
+        if failures:
+            continue
+        if not any(
+            call.qualname == "_find_orphaned_packages" and call.scope == scope
+            for call in facts.calls
+        ):
+            findings.append(
+                _summary(
+                    _GUARD_ORPHAN_SELECTION,
+                    path,
+                    f"{scope} must route orphan selection through _find_orphaned_packages",
+                )
+            )
+    return tuple(findings)
 
 
 def check_immutable_requirements(provider: FactsProvider) -> tuple[Violation, ...]:

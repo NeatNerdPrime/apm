@@ -398,6 +398,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="The registry client loses the canonical MCP registry precedence resolver.",
     ),
     MutationCase(
+        guard_id="install-deployment-orphan-selection",
+        rule_id="install-deployment-orphan-selection",
+        path="src/apm_cli/commands/prune.py",
+        old="_find_orphaned_packages(",
+        new="_find_orphaned_packages_disabled(",
+        intent="Prune bypasses the shared declaration-aware orphan selector.",
+    ),
+    MutationCase(
         guard_id="install-deployment-outcome",
         rule_id="install-deployment-outcome",
         path="src/apm_cli/install/outcome.py",
@@ -1183,6 +1191,20 @@ def test_owner_rules_report_nothing_before_mutation(
 ) -> None:
     """Every owner rule is clean at HEAD, so any violation below is the mutation."""
     assert baseline_violated_rule_ids == frozenset()
+
+
+def test_orphan_selection_guard_rejects_warning_bypass() -> None:
+    """The shared-selector rule protects warnings as well as destructive pruning."""
+    path = "src/apm_cli/commands/_helpers.py"
+    source = _source(path)
+    old = "return _find_orphaned_packages(installed, expected)"
+    assert source.count(old) == 1
+    mutated = source.replace(old, "return sorted(set(installed) - expected)", 1)
+    ast.parse(mutated, filename=path)
+    rule_id = "install-deployment-orphan-selection"
+    report = run_selected_rules(ROOT, (rule_id,), source_overrides={path: mutated})
+    assert report.failures == ()
+    assert any(violation.rule_id == rule_id for violation in report.violations)
 
 
 def test_ref_freshness_guard_rejects_unconditional_cache_publication() -> None:
